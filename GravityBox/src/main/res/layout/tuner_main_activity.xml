@@ -63,7 +63,7 @@
 
     <View style="@style/Divider" />
 
-    <fragment android:name="com.ceco.r.gravitybox.tuner.TunerMainActivity$PrefsFragment"
+    <fragment android:name="com.ceco.v.gravitybox.tuner.TunerMainActivity$PrefsFragment"
         android:id="@+id/prefs_fragment"
         android:layout_width="match_parent"
         android:layout_height="0dp"

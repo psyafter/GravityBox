@@ -19,13 +19,13 @@
         android:key="pref_lc_qh_range_days"
         android:title="@string/pref_lc_qh_range_days_title" />
 
-    <com.ceco.r.gravitybox.preference.TimePreference
+    <com.ceco.v.gravitybox.preference.TimePreference
         android:key="pref_lc_qh_range_start"
         android:title="@string/pref_lc_qh_start_title"
         android:defaultValue="1380"
         android:persistent="false" />
 
-    <com.ceco.r.gravitybox.preference.TimePreference
+    <com.ceco.v.gravitybox.preference.TimePreference
         android:key="pref_lc_qh_range_end"
         android:title="@string/pref_lc_qh_end_title"
         android:defaultValue="360"

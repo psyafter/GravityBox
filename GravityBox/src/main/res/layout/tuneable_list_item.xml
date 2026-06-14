@@ -53,7 +53,7 @@
             android:singleLine="true" />
     </LinearLayout>
 
-    <com.ceco.r.gravitybox.tuner.TuneableStatusView
+    <com.ceco.v.gravitybox.tuner.TuneableStatusView
         android:id="@+id/tuneable_overridden"
         android:layout_width="20dp"
         android:layout_height="20dp"

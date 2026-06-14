@@ -23,7 +23,7 @@
         android:layout_width="match_parent"
         android:layout_weight="1"
         android:layout_height="0dp"
-        class="com.ceco.r.gravitybox.ledcontrol.QuietHoursRangeActivity$PrefsFragment" />
+        class="com.ceco.v.gravitybox.ledcontrol.QuietHoursRangeActivity$PrefsFragment" />
 
     <LinearLayout
         android:layout_width="match_parent"

@@ -1,11 +1,12 @@
 apply plugin: 'com.android.application'
 android {
-    compileSdkVersion 29
+    namespace 'com.ceco.v.gravitybox'
+    compileSdkVersion 35
     defaultConfig {
-        applicationId 'com.ceco.r.gravitybox'
-        minSdkVersion 29
+        applicationId 'com.ceco.v.gravitybox'
+        minSdkVersion 35
         //noinspection OldTargetApi
-        targetSdkVersion 29
+        targetSdkVersion 35
     }
     buildTypes {
         debug {
@@ -20,16 +21,14 @@ android {
         }
     }
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
-    }
-    productFlavors {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
     }
 }
 
 dependencies {
     compileOnly 'de.robv.android.xposed:api:82'
-    implementation 'com.google.android.material:material:1.2.1'
+    implementation 'com.google.android.material:material:1.12.0'
     implementation 'androidx.palette:palette:1.0.0'
-    api 'com.theartofdev.edmodo:android-image-cropper:2.8.+'
+    api 'com.vanniktech:android-image-cropper:4.6.0'
 }

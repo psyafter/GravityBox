@@ -39,6 +39,10 @@
         <item name="android:colorAccent">#ff2581df</item>
         <item name="android:dialogTheme">@style/DialogStyle</item>
         <item name="android:alertDialogTheme">@style/AlertDialogStyle</item>
+        <!-- Android 15 (SDK 35) forces edge-to-edge; the legacy UI doesn't apply window
+             insets, so the action bar/content would slide under the status & nav bars.
+             Opt out to keep content fitted within the system bars. -->
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
     </style>
 
     <!-- Light application AppCompat theme -->
@@ -51,6 +55,7 @@
         <item name="colorAccent">#ff2581df</item>
         <item name="dialogTheme">@style/DialogStyle</item>
         <item name="alertDialogTheme">@style/AlertDialogStyle</item>
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
     </style>
 
     <!-- Dark application theme -->
@@ -70,6 +75,7 @@
         <item name="android:colorAccent">#ff2581df</item>
         <item name="android:dialogTheme">@style/DialogStyleDark</item>
         <item name="android:alertDialogTheme">@style/AlertDialogStyleDark</item>
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
     </style>
 
     <!-- Dark application AppCompat theme -->
@@ -78,6 +84,7 @@
         <item name="colorAccent">#ff2581df</item>
         <item name="dialogTheme">@style/DialogStyleDark</item>
         <item name="alertDialogTheme">@style/AlertDialogStyleDark</item>
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
     </style>
 
     <!-- AppLauncher labels -->

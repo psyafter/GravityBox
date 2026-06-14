@@ -58,7 +58,7 @@
             alphaSlider="true"
             android:persistent="false" />
 
-        <com.ceco.r.gravitybox.preference.SeekBarPreference
+        <com.ceco.v.gravitybox.preference.SeekBarPreference
             android:key="pref_lc_led_time_on"
             android:title="@string/pref_lc_led_time_on_title"
             minimum="50"
@@ -69,7 +69,7 @@
             android:defaultValue="1000"
             android:persistent="false" />
 
-        <com.ceco.r.gravitybox.preference.SeekBarPreference
+        <com.ceco.v.gravitybox.preference.SeekBarPreference
             android:key="pref_lc_led_time_off"
             android:title="@string/pref_lc_led_time_off_title"
             minimum="0"
@@ -113,7 +113,7 @@
             android:defaultValue="false"
             android:persistent="false" />
 
-        <com.ceco.r.gravitybox.preference.SeekBarPreference
+        <com.ceco.v.gravitybox.preference.SeekBarPreference
             android:key="pref_lc_notif_sound_only_once_timeout"
             android:title="@string/pref_lc_notif_sound_only_once_timeout_title"
             minimum="0"
@@ -231,7 +231,7 @@
             android:defaultValue="DEFAULT"
             android:persistent="false" />
 
-        <com.ceco.r.gravitybox.preference.SeekBarPreference
+        <com.ceco.v.gravitybox.preference.SeekBarPreference
             android:key="pref_lc_headsup_timeout"
             android:title="@string/pref_heads_up_timeout_title"
             android:summary="@string/pref_heads_up_timeout_summary"

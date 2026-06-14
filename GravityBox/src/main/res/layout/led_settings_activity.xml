@@ -19,7 +19,7 @@
     android:orientation="vertical"
     android:gravity="center_vertical" >
 
-    <fragment android:name="com.ceco.r.gravitybox.ledcontrol.LedSettingsFragment"
+    <fragment android:name="com.ceco.v.gravitybox.ledcontrol.LedSettingsFragment"
         android:id="@+id/prefs_fragment"
         android:layout_width="match_parent"
         android:layout_weight="1"

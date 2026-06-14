@@ -28,7 +28,7 @@
         android:padding="6dp"
         android:visibility="gone" />
 
-    <fragment android:name="com.ceco.r.gravitybox.ledcontrol.LedMainActivity$PrefsFragment"
+    <fragment android:name="com.ceco.v.gravitybox.ledcontrol.LedMainActivity$PrefsFragment"
         android:id="@+id/prefs_fragment"
         android:layout_width="match_parent"
         android:layout_weight="1"

@@ -50,7 +50,7 @@
         android:paddingStart="15dp"
         android:paddingEnd="15dp"/>
 
-    <fragment android:name="com.ceco.r.gravitybox.tuner.TunerDetailActivity$PrefsFragment"
+    <fragment android:name="com.ceco.v.gravitybox.tuner.TunerDetailActivity$PrefsFragment"
         android:id="@+id/prefs_fragment"
         android:layout_width="match_parent"
         android:layout_weight="1"
