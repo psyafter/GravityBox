@@ -42,7 +42,7 @@ public class ModVolumeKeySkipTrack {
     private static final String TAG = "GB:ModVolumeKeySkipTrack";
     private static final String CLASS_PHONE_WINDOW_MANAGER = "com.android.server.policy.PhoneWindowManager";
     private static final String CLASS_IWINDOW_MANAGER = "android.view.IWindowManager";
-    private static final String CLASS_WINDOW_MANAGER_FUNCS = "com.android.server.policy.WindowManagerPolicy.WindowManagerFuncs";
+    private static final String CLASS_WINDOW_MANAGER_FUNCS = "com.android.server.policy.WindowManagerPolicy$WindowManagerFuncs";
     private static final boolean DEBUG = false;
 
 
@@ -87,8 +87,9 @@ public class ModVolumeKeySkipTrack {
                     "; mVolumeRockerWakeMode=" + mVolumeRockerWakeMode +
                     "; mVolumeRockerWakeAllowMusic=" + mVolumeRockerWakeAllowMusic);
 
+            // Android 14+/One UI: PhoneWindowManager.init dropped the IWindowManager param.
             XposedHelpers.findAndHookMethod(CLASS_PHONE_WINDOW_MANAGER, classLoader, "init",
-                    Context.class, CLASS_IWINDOW_MANAGER, CLASS_WINDOW_MANAGER_FUNCS,
+                    Context.class, CLASS_WINDOW_MANAGER_FUNCS,
                     handleConstructPhoneWindowManager);
 
             XposedHelpers.findAndHookMethod(CLASS_PHONE_WINDOW_MANAGER, classLoader,

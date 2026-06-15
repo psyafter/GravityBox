@@ -76,7 +76,7 @@ public class ModHwKeys {
     private static final String TAG = "GB:ModHwKeys";
     private static final String CLASS_PHONE_WINDOW_MANAGER = "com.android.server.policy.PhoneWindowManager";
     private static final String CLASS_WINDOW_STATE = "com.android.server.policy.WindowManagerPolicy$WindowState";
-    private static final String CLASS_WINDOW_MANAGER_FUNCS = "com.android.server.policy.WindowManagerPolicy.WindowManagerFuncs";
+    private static final String CLASS_WINDOW_MANAGER_FUNCS = "com.android.server.policy.WindowManagerPolicy$WindowManagerFuncs";
     private static final String CLASS_IWINDOW_MANAGER = "android.view.IWindowManager";
     private static final String CLASS_VIBRATION_EFFECT = "android.os.VibrationEffect";
     private static final String CLASS_HOME_BUTTON_HANDLER = CLASS_PHONE_WINDOW_MANAGER + ".DisplayHomeButtonHandler";
@@ -519,8 +519,10 @@ public class ModHwKeys {
             mPhoneWindowManagerClass = XposedHelpers.findClass(CLASS_PHONE_WINDOW_MANAGER, classLoader);
             initReflections(mPhoneWindowManagerClass);
 
+            // Android 14+/One UI: PhoneWindowManager.init dropped the IWindowManager param
+            // -> now init(Context, WindowManagerPolicy$WindowManagerFuncs).
             XposedHelpers.findAndHookMethod(mPhoneWindowManagerClass, "init",
-                Context.class, CLASS_IWINDOW_MANAGER, CLASS_WINDOW_MANAGER_FUNCS, phoneWindowManagerInitHook);
+                Context.class, CLASS_WINDOW_MANAGER_FUNCS, phoneWindowManagerInitHook);
 
             XposedHelpers.findAndHookMethod(mPhoneWindowManagerClass, "interceptKeyBeforeQueueing",
                     KeyEvent.class, int.class, new XC_MethodHook(XCallback.PRIORITY_HIGHEST) {
@@ -864,19 +866,24 @@ public class ModHwKeys {
                 }
             });
 
-            XposedHelpers.findAndHookMethod(mPhoneWindowManagerClass, 
-                    "isWakeKeyWhenScreenOff", int.class, new XC_MethodHook() {
-
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
-                    int keyCode = (Integer) param.args[0];
-                    if (!mVolumeRockerWake.equals("default") && 
-                            (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN ||
-                             keyCode == KeyEvent.KEYCODE_VOLUME_UP)) {
-                        param.setResult(mVolumeRockerWake.equals("enabled") && (!getAudioManager().isMusicActive() || mVolumeRockerWakeAllowMusic));
+            // isWakeKeyWhenScreenOff(int) no longer exists on One UI 7; hook only if present.
+            if (XposedHelpers.findMethodExactIfExists(mPhoneWindowManagerClass,
+                    "isWakeKeyWhenScreenOff", int.class) != null) {
+                XposedHelpers.findAndHookMethod(mPhoneWindowManagerClass,
+                        "isWakeKeyWhenScreenOff", int.class, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        int keyCode = (Integer) param.args[0];
+                        if (!mVolumeRockerWake.equals("default") &&
+                                (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN ||
+                                 keyCode == KeyEvent.KEYCODE_VOLUME_UP)) {
+                            param.setResult(mVolumeRockerWake.equals("enabled") && (!getAudioManager().isMusicActive() || mVolumeRockerWakeAllowMusic));
+                        }
                     }
-                }
-            });
+                });
+            } else if (DEBUG) {
+                log("isWakeKeyWhenScreenOff not available on this ROM; volume-rocker-wake disabled");
+            }
 
             XposedHelpers.findAndHookMethod(mPhoneWindowManagerClass,
                     "readConfigurationDependentBehaviors", new XC_MethodHook() {
@@ -905,12 +912,19 @@ public class ModHwKeys {
                 }
             };
 
-            if (Utils.isSamsungRom()) {
-                XposedHelpers.findAndHookMethod(CLASS_HOME_BUTTON_HANDLER, classLoader,
+            // DisplayHomeButtonHandler.handleDoubleTapOnHome no longer present on One UI 7;
+            // hook only if the class/method still exists (double-tap-home action degrades gracefully).
+            Class<?> homeBtnHandler = XposedHelpers.findClassIfExists(CLASS_HOME_BUTTON_HANDLER, classLoader);
+            if (homeBtnHandler != null && XposedHelpers.findMethodExactIfExists(
+                    homeBtnHandler, "handleDoubleTapOnHome", int.class) != null) {
+                XposedHelpers.findAndHookMethod(homeBtnHandler,
                         "handleDoubleTapOnHome", int.class, doubleTapOnHomeHook);
-            } else {
-                XposedHelpers.findAndHookMethod(CLASS_HOME_BUTTON_HANDLER, classLoader,
+            } else if (homeBtnHandler != null && XposedHelpers.findMethodExactIfExists(
+                    homeBtnHandler, "handleDoubleTapOnHome") != null) {
+                XposedHelpers.findAndHookMethod(homeBtnHandler,
                         "handleDoubleTapOnHome", doubleTapOnHomeHook);
+            } else if (DEBUG) {
+                log("handleDoubleTapOnHome not available on this ROM; double-tap-home via handler disabled");
             }
         } catch (Throwable t) {
             GravityBox.log(TAG, t);

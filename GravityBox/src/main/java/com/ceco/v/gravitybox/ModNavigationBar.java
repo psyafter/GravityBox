@@ -55,15 +55,19 @@ public class ModNavigationBar {
     private static final String TAG = "GB:ModNavigationBar";
     private static final boolean DEBUG = false;
 
-    private static final String CLASS_NAVBAR_VIEW = "com.android.systemui.statusbar.phone.NavigationBarView";
-    static final String CLASS_NAVBAR_FRAGMENT = "com.android.systemui.statusbar.phone.NavigationBarFragment";
-    private static final String CLASS_KEY_BUTTON_VIEW = "com.android.systemui.statusbar.policy.KeyButtonView";
-    private static final String CLASS_KEY_BUTTON_RIPPLE = "com.android.systemui.statusbar.policy.KeyButtonRipple";
-    private static final String CLASS_KEY_BUTTON_DRAWABLE = "com.android.systemui.statusbar.policy.KeyButtonDrawable";
-    private static final String CLASS_STATUSBAR = "com.android.systemui.statusbar.phone.StatusBar";
-    private static final String CLASS_NAVBAR_INFLATER_VIEW = "com.android.systemui.statusbar.phone.NavigationBarInflaterView";
-    private static final String CLASS_NAVBAR_TRANSITIONS = "com.android.systemui.statusbar.phone.NavigationBarTransitions";
-    private static final String CLASS_CONTEXTUAL_BTN_GRP = "com.android.systemui.statusbar.phone.ContextualButtonGroup";
+    // Android 15 / One UI 7: navbar was moved out of statusbar.phone into the dedicated
+    // 'navigationbar' package (AOSP A12+) and Samsung renders its own subclasses
+    // (SamsungNavigationBarView / SamsungNavigationBarInflaterView), which override the
+    // hooked methods - so we hook the Samsung classes where they exist.
+    private static final String CLASS_NAVBAR_VIEW = "com.android.systemui.navigationbar.SamsungNavigationBarView";
+    static final String CLASS_NAVBAR_FRAGMENT = "com.android.systemui.navigationbar.NavigationBar";
+    private static final String CLASS_KEY_BUTTON_VIEW = "com.android.systemui.navigationbar.buttons.KeyButtonView";
+    private static final String CLASS_KEY_BUTTON_RIPPLE = "com.android.systemui.shared.navigationbar.KeyButtonRipple";
+    private static final String CLASS_KEY_BUTTON_DRAWABLE = "com.android.systemui.navigationbar.buttons.KeyButtonDrawable";
+    private static final String CLASS_STATUSBAR = "com.android.systemui.statusbar.phone.CentralSurfaces";
+    private static final String CLASS_NAVBAR_INFLATER_VIEW = "com.android.systemui.navigationbar.SamsungNavigationBarInflaterView";
+    private static final String CLASS_NAVBAR_TRANSITIONS = "com.android.systemui.navigationbar.NavigationBarTransitions";
+    private static final String CLASS_CONTEXTUAL_BTN_GRP = "com.android.systemui.navigationbar.buttons.ContextualButtonGroup";
 
     @SuppressWarnings("unused")
     public static final int MODE_OPAQUE = 0;
@@ -468,19 +472,26 @@ public class ModNavigationBar {
             GravityBox.log(TAG, "Error hooking sendEvent:", t);
         }
 
-        try {
-            XposedHelpers.findAndHookMethod(CLASS_STATUSBAR, classLoader,
-                    "toggleSplitScreenMode", int.class, int.class, new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
-                    if (mRecentsLongpressAction.actionId != 0 &&
-                            (int)param.args[0] != -1 && (int)param.args[1] != -1) {
-                        param.setResult(false);
+        // toggleSplitScreenMode has no equivalent on One UI's CentralSurfaces; hook only if present.
+        Class<?> statusbarClass = XposedHelpers.findClassIfExists(CLASS_STATUSBAR, classLoader);
+        if (statusbarClass != null && XposedHelpers.findMethodExactIfExists(statusbarClass,
+                "toggleSplitScreenMode", int.class, int.class) != null) {
+            try {
+                XposedHelpers.findAndHookMethod(statusbarClass,
+                        "toggleSplitScreenMode", int.class, int.class, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (mRecentsLongpressAction.actionId != 0 &&
+                                (int)param.args[0] != -1 && (int)param.args[1] != -1) {
+                            param.setResult(false);
+                        }
                     }
-                }
-            });
-        } catch (Throwable t) {
-            GravityBox.log(TAG, "Error hooking toggleSplitScreenMode:", t);
+                });
+            } catch (Throwable t) {
+                GravityBox.log(TAG, "Error hooking toggleSplitScreenMode:", t);
+            }
+        } else if (DEBUG) {
+            log("toggleSplitScreenMode not available on this ROM; skipping");
         }
 
         if (Utils.isOxygenOsRom() && XposedHelpers.findMethodExactIfExists(
@@ -599,13 +610,20 @@ public class ModNavigationBar {
 
     private static Drawable getMenuKeyDrawable(Context ctx) {
         try {
+            Drawable icon = mGbContext.getDrawable(R.drawable.ic_navbar_menu);
             if (Utils.isOxygenOsRom()) {
-                return mGbContext.getDrawable(R.drawable.ic_navbar_menu);
-            } else {
+                return icon;
+            }
+            try {
                 Class<?> classKbd = XposedHelpers.findClass(CLASS_KEY_BUTTON_DRAWABLE,
                     ctx.getClassLoader());
+                // Android 15 / One UI signature: create(Context, lightDrawable, darkDrawable, boolean)
+                Drawable darkIcon = mGbContext.getDrawable(R.drawable.ic_navbar_menu);
                 return (Drawable) XposedHelpers.callStaticMethod(classKbd, "create",
-                        ctx.getApplicationContext(), ResourceProxy.getFakeResId("ic_navbar_menu"), false);
+                        ctx.getApplicationContext(), icon, darkIcon, false);
+            } catch (Throwable t) {
+                if (DEBUG) log("KeyButtonDrawable.create unavailable, using plain drawable: " + t);
+                return icon;
             }
         } catch (Throwable t) {
             GravityBox.log(TAG, t);
