@@ -562,9 +562,15 @@ public class ModLedControl {
         Notification notif = null;
         if (record != null) {
             try {
-                notif = (Notification) XposedHelpers.callMethod(record, "getNotification");
+                // Android 15: NotificationRecord.getNotification() was removed; go via getSbn().
+                Object sbn = XposedHelpers.callMethod(record, "getSbn");
+                notif = (Notification) XposedHelpers.callMethod(sbn, "getNotification");
             } catch (Throwable t) {
-                GravityBox.log(TAG, "Error in getNotificationFromRecord: ", t);
+                try {
+                    notif = (Notification) XposedHelpers.callMethod(record, "getNotification");
+                } catch (Throwable t2) {
+                    GravityBox.log(TAG, "Error in getNotificationFromRecord: ", t2);
+                }
             }
         }
         return notif;
@@ -596,7 +602,7 @@ public class ModLedControl {
         @Override
         protected void afterHookedMethod(final MethodHookParam param) {
             try {
-                Notification n = (Notification) XposedHelpers.callMethod(param.args[0], "getNotification");
+                Notification n = getNotificationFromRecord(param.args[0]);
                 if (!mUncActiveScreenEnabled ||
                         !n.extras.containsKey(NOTIF_EXTRA_ACTIVE_SCREEN) ||
                         !n.extras.containsKey(NOTIF_EXTRA_ACTIVE_SCREEN_MODE) ||

@@ -1203,9 +1203,19 @@ public class ModHwKeys {
 
     private static void performHapticFeedback(int effect, boolean always, String reason) {
         try {
+            // Android 15 / One UI reordered the params to (int, String, boolean).
             XposedHelpers.callMethod(mPhoneWindowManager, "performHapticFeedback",
-                    new Class<?> [] { int.class, boolean.class, String.class },
-                    effect, always, reason);
+                    new Class<?> [] { int.class, String.class, boolean.class },
+                    effect, reason, always);
+        } catch (NoSuchMethodError nsme) {
+            try {
+                // Legacy signature (int, boolean, String).
+                XposedHelpers.callMethod(mPhoneWindowManager, "performHapticFeedback",
+                        new Class<?> [] { int.class, boolean.class, String.class },
+                        effect, always, reason);
+            } catch (Throwable t) {
+                GravityBox.log(TAG, "Error calling performHapticFeedback:", t);
+            }
         } catch (Throwable t) {
             GravityBox.log(TAG, "Error calling performHapticFeedback:", t);
         }
