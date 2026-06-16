@@ -175,20 +175,26 @@ public class ModAudio {
                 } 
             });
 
+            // Android 15: updateStreamVolumeAlias params reordered -> (String, boolean).
             XposedHelpers.findAndHookMethod(classAudioService, "updateStreamVolumeAlias",
-                    boolean.class, String.class, new XC_MethodHook() {
+                    String.class, boolean.class, new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(final MethodHookParam param) {
-                    if ((Boolean) XposedHelpers.callMethod(param.thisObject, "isPlatformVoice")) {
-                        int[] streamVolumeAlias = (int[]) XposedHelpers.getObjectField(param.thisObject, "mStreamVolumeAlias");
-                        if (mNotifStreamAliasOrig == null) mNotifStreamAliasOrig = streamVolumeAlias[AudioManager.STREAM_NOTIFICATION];
-                        if (mSystemStreamAliasOrig == null) mSystemStreamAliasOrig = streamVolumeAlias[AudioManager.STREAM_SYSTEM];
-                        streamVolumeAlias[AudioManager.STREAM_NOTIFICATION] = getNotifStreamAlias();
-                        if (DEBUG) log("AudioService mStreamVolumeAlias updated, STREAM_NOTIFICATION set to: " +
-                                    streamVolumeAlias[AudioManager.STREAM_NOTIFICATION]);
-                        streamVolumeAlias[AudioManager.STREAM_SYSTEM] = getSystemStreamAlias();
-                        if (DEBUG) log("AudioService mStreamVolumeAlias updated, STREAM_SYSTEM set to: " +
-                                streamVolumeAlias[AudioManager.STREAM_SYSTEM]);
+                    try {
+                        // isPlatformVoice() was removed on One UI; assume voice-capable if absent.
+                        boolean platformVoice = true;
+                        try {
+                            platformVoice = (Boolean) XposedHelpers.callMethod(param.thisObject, "isPlatformVoice");
+                        } catch (Throwable ignore) { }
+                        if (platformVoice) {
+                            int[] streamVolumeAlias = (int[]) XposedHelpers.getObjectField(param.thisObject, "mStreamVolumeAlias");
+                            if (mNotifStreamAliasOrig == null) mNotifStreamAliasOrig = streamVolumeAlias[AudioManager.STREAM_NOTIFICATION];
+                            if (mSystemStreamAliasOrig == null) mSystemStreamAliasOrig = streamVolumeAlias[AudioManager.STREAM_SYSTEM];
+                            streamVolumeAlias[AudioManager.STREAM_NOTIFICATION] = getNotifStreamAlias();
+                            streamVolumeAlias[AudioManager.STREAM_SYSTEM] = getSystemStreamAlias();
+                        }
+                    } catch (Throwable t) {
+                        if (DEBUG) GravityBox.log(TAG, "updateStreamVolumeAlias hook:", t);
                     }
                 }
             });
@@ -245,7 +251,7 @@ public class ModAudio {
         }
 
         try {
-            XposedHelpers.callMethod(mAudioService, "updateStreamVolumeAlias", true, "AudioService");
+            XposedHelpers.callMethod(mAudioService, "updateStreamVolumeAlias", "AudioService", true);
         } catch (Throwable t) {
             GravityBox.log(TAG, t);
         }

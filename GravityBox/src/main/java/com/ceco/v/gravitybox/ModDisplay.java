@@ -188,8 +188,9 @@ public class ModDisplay {
         try {
             Object ls = XposedHelpers.getSurroundingThis(mLight);
             Object[] lights = (Object[]) XposedHelpers.getObjectField(ls, "mLights");
+            // Android 15: LightImpl.setLightLocked dropped a param -> (int,int,int,int).
             XposedHelpers.callMethod(lights[lightId],
-                    "setLightLocked", 0, 0, 0, 0, 0);
+                    "setLightLocked", 0, 0, 0, 0);
         } catch (Throwable t) {
             GravityBox.log(TAG, t);
         }
@@ -302,7 +303,7 @@ public class ModDisplay {
             });
 
             XposedHelpers.findAndHookMethod(classLight, "setLightLocked",
-                    int.class, int.class, int.class, int.class, int.class, new XC_MethodHook() {
+                    int.class, int.class, int.class, int.class, new XC_MethodHook() {
 
                 @Override
                 protected void beforeHookedMethod(final MethodHookParam param) {
