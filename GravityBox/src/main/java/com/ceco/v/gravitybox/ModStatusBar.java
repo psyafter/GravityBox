@@ -43,6 +43,7 @@ import android.hardware.display.DisplayManager;
 import android.os.AsyncTask;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.Looper;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.provider.Settings;
@@ -149,6 +150,8 @@ public class ModStatusBar {
     private static int BRIGHTNESS_ON = 255;
     private static float mPrevBrightness = -1f;
     private static float mPrevBrightnessAuto = -1f;
+    private static Handler mBcHandler;       // brightness-control handler (A15: no StatusBar)
+    private static View mBcView;             // status bar view captured from onTouchEvent
 
     private static List<StatusBarStateChangedListener> mStateChangeListeners =
             new ArrayList<>();
@@ -530,9 +533,12 @@ public class ModStatusBar {
         try {
             mPrefs = prefs;
 
+            // A15/One UI: the monolithic StatusBar class is gone (-> CentralSurfaces). Use
+            // findClassIfExists so init does NOT abort; StatusBar-controller hooks are guarded
+            // individually below and features are driven from PhoneStatusBarView where possible.
             final Class<?> statusBarClass =
-                    XposedHelpers.findClass(CLASS_STATUSBAR, classLoader);
-            final Class<?> expandableNotifRowClass = XposedHelpers.findClass(CLASS_EXPANDABLE_NOTIF_ROW, classLoader);
+                    XposedHelpers.findClassIfExists(CLASS_STATUSBAR, classLoader);
+            final Class<?> expandableNotifRowClass = XposedHelpers.findClassIfExists(CLASS_EXPANDABLE_NOTIF_ROW, classLoader);
 
             if (mPrefs.getBoolean(GravityBoxSettings.PREF_KEY_STATUSBAR_CLOCK_MASTER_SWITCH, false)) {
                 QuickStatusBarHeader.init(classLoader);
@@ -561,6 +567,9 @@ public class ModStatusBar {
                 GravityBox.log(TAG, "Invalid value for mHomeLongpressAction");
             }
 
+            // StatusBar-controller hooks below are gone on A15/One UI; guard so init does not
+            // abort and the PhoneStatusBarView-based features (brightness, DT2S) still register.
+            try {
             XposedBridge.hookAllMethods(statusBarClass, "makeStatusBarView", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
@@ -619,6 +628,9 @@ public class ModStatusBar {
                     prepareQuietHoursIcon();
                 }
             });
+            } catch (Throwable t) {
+                GravityBox.log(TAG, "StatusBar-controller hooks unavailable on A15: " + t);
+            }
 
             // Header
             try {
@@ -636,41 +648,8 @@ public class ModStatusBar {
                 GravityBox.log(TAG, "Error setting up header:" + t);
             }
 
-            // brightness control
-            try {
-                XposedHelpers.findAndHookMethod(statusBarClass, 
-                        "interceptTouchEvent", MotionEvent.class, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        if (!mBrightnessControlEnabled) return;
-    
-                        brightnessControl((MotionEvent) param.args[0]);
-                        if ((XposedHelpers.getIntField(param.thisObject, "mDisabled1")
-                                & STATUS_BAR_DISABLE_EXPAND) != 0) {
-                            param.setResult(true);
-                        }
-                    }
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        if (!mBrightnessControlEnabled || !mBrightnessChanged) return;
-    
-                        int action = ((MotionEvent) param.args[0]).getAction();
-                        final boolean upOrCancel = (action == MotionEvent.ACTION_UP ||
-                                action == MotionEvent.ACTION_CANCEL);
-                        if (upOrCancel) {
-                            mBrightnessChanged = false;
-                            if (mJustPeeked && XposedHelpers.getBooleanField(
-                                    param.thisObject, "mExpandedVisible")) {
-                                Object notifPanel = XposedHelpers.getObjectField(
-                                        param.thisObject, "mNotificationPanelViewController");
-                                XposedHelpers.callMethod(notifPanel, "fling", 10, false);
-                            }
-                        }
-                    }
-                });
-            } catch (Throwable t) {
-                GravityBox.log(TAG, "Error setting up brightness control", t);
-            }
+            // brightness control: on A15 the old StatusBar.interceptTouchEvent is gone;
+            // the gesture is now driven from the PhoneStatusBarView.onTouchEvent hook below.
 
             // Ongoing notification blocker and progress bar
             try {
@@ -773,7 +752,11 @@ public class ModStatusBar {
             }
 
             // Status bar system icon policy
-            mSystemIconController = new SystemIconController(classLoader, prefs);
+            try {
+                mSystemIconController = new SystemIconController(classLoader, prefs);
+            } catch (Throwable t) {
+                GravityBox.log(TAG, "Error setting up SystemIconController: " + t);
+            }
 
             // status bar state change handling
             try {
@@ -834,8 +817,28 @@ public class ModStatusBar {
                         "onTouchEvent", MotionEvent.class, new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) {
+                        MotionEvent ev = (MotionEvent) param.args[0];
+                        View sbv = (View) param.thisObject;
+                        // A15: makeStatusBarView (which used to set these) no longer fires; init lazily.
+                        if (mContext == null) {
+                            mContext = sbv.getContext();
+                            prepareBrightnessControl();
+                        }
+                        // A15: brightness control is driven here (StatusBar.interceptTouchEvent is gone)
+                        if (mBrightnessControlEnabled) {
+                            brightnessControl(ev, sbv);
+                        }
                         if (mDt2sEnabled && mDisablePeek && mGestureDetector != null) {
-                            mGestureDetector.onTouchEvent((MotionEvent)param.args[0]);
+                            mGestureDetector.onTouchEvent(ev);
+                        }
+                    }
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        if (mBrightnessControlEnabled && mBrightnessChanged) {
+                            int action = ((MotionEvent) param.args[0]).getAction();
+                            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                                mBrightnessChanged = false;
+                            }
                         }
                     }
                 });
@@ -876,7 +879,7 @@ public class ModStatusBar {
                             View kgHeader = (View) XposedHelpers.getObjectField(
                                     host, "mKeyguardStatusBar");
                             if (kgHeader.getVisibility() == View.VISIBLE) {
-                                brightnessControl((MotionEvent) param.args[1]);
+                                brightnessControl((MotionEvent) param.args[1], null);
                             }
                         }
                     }
@@ -1266,8 +1269,9 @@ public class ModStatusBar {
         @Override
         public void run() {
             try {
-                XposedHelpers.callMethod(mStatusBarView, "performHapticFeedback", 
-                        HapticFeedbackConstants.LONG_PRESS);
+                if (mBcView != null) {
+                    mBcView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+                }
                 adjustBrightness(mInitialTouchX);
                 mLinger = BRIGHTNESS_CONTROL_LINGER_THRESHOLD + 1;
             } catch (Throwable t) {
@@ -1309,17 +1313,15 @@ public class ModStatusBar {
                                     mContext.getContentResolver(), "screen_auto_brightness_adj", val, -2));
                 }
             } else {
-                int newBrightness = mMinBrightness + Math.round(value *
-                        (BRIGHTNESS_ON - mMinBrightness));
-                newBrightness = Math.min(newBrightness, BRIGHTNESS_ON);
-                newBrightness = Math.max(newBrightness, mMinBrightness);
-                final int val = newBrightness;
+                // A15: brightness is a float 0..1; setTemporaryBrightness(displayId, float).
+                final float val = Math.max(0.004f, Math.min(1f, value));
                 if (mPrevBrightness != val) {
                     mPrevBrightness = val;
-                    XposedHelpers.callMethod(getDisplayManager(), "setTemporaryBrightness", val);
+                    XposedHelpers.callMethod(getDisplayManager(), "setTemporaryBrightness",
+                            0 /* Display.DEFAULT_DISPLAY */, val);
                     AsyncTask.execute(() ->
-                            XposedHelpers.callStaticMethod(Settings.System.class, "putIntForUser",
-                                    mContext.getContentResolver(), Settings.System.SCREEN_BRIGHTNESS, val, -2));
+                            XposedHelpers.callStaticMethod(Settings.System.class, "putFloatForUser",
+                                    mContext.getContentResolver(), "screen_brightness_float", val, -2));
                 }
             }
         } catch (Throwable t) {
@@ -1327,13 +1329,19 @@ public class ModStatusBar {
         }
     }
 
-    private static void brightnessControl(MotionEvent event) {
+    private static void brightnessControl(MotionEvent event, View barView) {
         try {
             final int action = event.getAction();
             final int x = (int) event.getRawX();
             final int y = (int) event.getRawY();
-            Handler handler = (Handler) XposedHelpers.getObjectField(mStatusBar, "mHandler");
-            int statusBarHeight = (int)XposedHelpers.callMethod(mStatusBar, "getStatusBarHeight");
+            // A15/One UI: the old StatusBar controller is gone; drive the gesture from the
+            // PhoneStatusBarView itself (own handler, view height as the status bar height).
+            mBcView = barView;
+            if (mBcHandler == null) mBcHandler = new Handler(Looper.getMainLooper());
+            Handler handler = mBcHandler;
+            int statusBarHeight = (barView != null && barView.getHeight() > 0) ? barView.getHeight()
+                    : (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 28,
+                            mContext.getResources().getDisplayMetrics());
 
             if (action == MotionEvent.ACTION_DOWN) {
                 if (y < statusBarHeight) {
