@@ -57,6 +57,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.ViewGroup;
+import android.view.ViewParent;
 import android.view.ViewGroup.LayoutParams;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -75,6 +76,9 @@ public class ModStatusBar {
     private static final String CLASS_NOTIF_ICON_CONTAINER = "com.android.systemui.statusbar.phone.NotificationIconContainer";
     private static final String CLASS_NOTIF_ENTRY_MANAGER = "com.android.systemui.statusbar.notification.NotificationEntryManager";
     private static final String CLASS_QS_FRAGMENT = "com.android.systemui.qs.QSFragment";
+    // A15/One UI: Samsung statusbar clock base class (QSClockIndicatorView extends QSClock
+    // extends TextView). The old AOSP statusbar.policy.Clock is gone.
+    private static final String CLASS_QS_CLOCK = "com.android.systemui.statusbar.policy.QSClock";
     public static final String CLASS_TOUCH_HANDLER = CLASS_PANEL_VIEW_CTRL + ".TouchHandler";
     private static final boolean DEBUG = false;
     private static final boolean DEBUG_LAYOUT = false;
@@ -283,6 +287,18 @@ public class ModStatusBar {
     private static ViewGroup getKeyguardStatusBar() {
         Object notifPanel = XposedHelpers.getObjectField(mStatusBar, "mNotificationPanelViewController");
         return (ViewGroup) XposedHelpers.getObjectField(notifPanel, "mKeyguardStatusBar");
+    }
+
+    // True if the view has a PhoneStatusBarView ancestor, i.e. it lives in the collapsed
+    // status bar (not the keyguard status bar or the QS-panel header).
+    private static boolean isInPhoneStatusBar(View v) {
+        ViewParent p = v.getParent();
+        int guard = 0;
+        while (p instanceof View && guard++ < 25) {
+            if (CLASS_PHONE_STATUSBAR_VIEW.equals(p.getClass().getName())) return true;
+            p = p.getParent();
+        }
+        return false;
     }
 
     private static void prepareLayoutStatusBar() {
@@ -630,6 +646,50 @@ public class ModStatusBar {
             });
             } catch (Throwable t) {
                 GravityBox.log(TAG, "StatusBar-controller hooks unavailable on A15: " + t);
+            }
+
+            // A15/One UI: the makeStatusBarView/setBar path that used to wire up the statusbar
+            // clock is dead. The Samsung clock view (QSClockIndicatorView extends QSClock) is
+            // created lazily, so capture it from QSClock.onAttachedToWindow instead. Filter to
+            // the collapsed-statusbar instance (id/clock living under a PhoneStatusBarView) to
+            // avoid grabbing the keyguard or QS-panel clock.
+            if (prefs.getBoolean(GravityBoxSettings.PREF_KEY_STATUSBAR_CLOCK_MASTER_SWITCH, false)) {
+                try {
+                    XposedBridge.hookAllMethods(
+                            XposedHelpers.findClass(CLASS_QS_CLOCK, classLoader),
+                            "onAttachedToWindow", new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            try {
+                                if (!(param.thisObject instanceof TextView)) return;
+                                TextView clock = (TextView) param.thisObject;
+                                Context ctx = clock.getContext();
+                                int clockId = ctx.getResources().getIdentifier(
+                                        "clock", "id", PACKAGE_NAME);
+                                if (clockId == 0 || clock.getId() != clockId) return;
+                                if (!isInPhoneStatusBar(clock)) return;
+                                if (mClock != null && mClock.getClock() == clock) return;
+                                if (mContext == null) mContext = ctx;
+
+                                if (mClock != null) {
+                                    mClock.destroy();
+                                    mClock = null;
+                                }
+                                mClock = new StatusbarClock(mPrefs);
+                                mClock.setClock((ViewGroup) clock.getParent(),
+                                        null, null, null, clock);
+                                setClockPosition(mPrefs.getString(
+                                        GravityBoxSettings.PREF_KEY_STATUSBAR_CLOCK_POSITION,
+                                        "DEFAULT"));
+                                if (DEBUG) log("Statusbar clock captured via QSClock.onAttachedToWindow");
+                            } catch (Throwable t) {
+                                GravityBox.log(TAG, "QSClock.onAttachedToWindow: ", t);
+                            }
+                        }
+                    });
+                } catch (Throwable t) {
+                    GravityBox.log(TAG, "Error hooking QSClock.onAttachedToWindow: " + t);
+                }
             }
 
             // Header

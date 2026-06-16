@@ -161,7 +161,8 @@ public class StatusbarClock implements BroadcastMediator.Receiver {
             }
         });
 
-        hookGetSmallTime();
+        hookTimeChanged();
+        renderClock();
     }
 
     public ClockPosition getCurrentPosition() {
@@ -189,14 +190,11 @@ public class StatusbarClock implements BroadcastMediator.Receiver {
         }
     }
 
+    // A15/One UI: the Samsung statusbar clock (QSClockIndicatorView extends QSClock extends
+    // TextView) has no updateClock()/getSmallTime() to drive. We own the text ourselves and
+    // re-render on demand.
     private void updateClock() {
-        try {
-            if (mClock != null) {
-                XposedHelpers.callMethod(mClock, "updateClock");
-            }
-        } catch (Throwable t) {
-            GravityBox.log(TAG, "Error in updateClock: ", t);
-        }
+        renderClock();
     }
 
     private void updateSecondsHandler() {
@@ -233,95 +231,94 @@ public class StatusbarClock implements BroadcastMediator.Receiver {
         setClockVisibility(true);
     }
 
-    private void hookGetSmallTime() {
+    // A15/One UI: the AOSP Clock.getSmallTime() text mechanism is gone. The Samsung clock
+    // (QSClockIndicatorView extends QSClock) refreshes its time through notifyTimeChanged(),
+    // which fires on every minute tick / time / timezone change. We hook it and re-render our
+    // own fully-built text on top, so we no longer depend on whatever Samsung put there.
+    private void hookTimeChanged() {
         try {
-            mHooks.add(XposedHelpers.findAndHookMethod(mClock.getClass(), "getSmallTime", new XC_MethodHook() {
-                @SuppressLint("SimpleDateFormat")
+            mHooks.addAll(XposedBridge.hookAllMethods(mClock.getClass(), "notifyTimeChanged",
+                    new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
-                    // is this a status bar Clock instance?
-                    // yes, if it contains our additional sbClock field
-                    if (DEBUG) log("getSmallTime() called. mAmPmHide=" + mAmPmHide);
-                    boolean isStatusbarClock = (XposedHelpers.getAdditionalInstanceField(param.thisObject, "sbClock") != null);
-                    if (DEBUG) log("Is statusbar clock: " + isStatusbarClock);
-                    // hide and finish if sb clock hidden
-                    if (isStatusbarClock && mClockHidden) {
-                        if (mClock.getVisibility() != View.GONE) {
-                            setClockVisibility(false);
-                        }
-                        return;
-                    }
-                    Calendar calendar = Calendar.getInstance(TimeZone.getDefault());
-                    boolean is24 = DateFormat.is24HourFormat(mClock.getContext());
-                    String clockText = param.getResult().toString();
-                    if (DEBUG) log("Original clockText: '" + clockText + "'");
-                    // generate fresh base time text if seconds enabled
-                    if (mShowSeconds && isStatusbarClock) {
-                        if (mSecondsFormat == null) {
-                            mSecondsFormat = new SimpleDateFormat(
-                                    DateFormat.getBestDateTimePattern(
-                                    Locale.getDefault(), is24 ? "Hms" : "hms"));
-                        }
-                        clockText = mSecondsFormat.format(calendar.getTime());
-                        if (DEBUG) log("New clock text with seconds: " + clockText);
-                    }
-                    String amPm = calendar.getDisplayName(
-                            Calendar.AM_PM, Calendar.SHORT, Locale.getDefault());
-                    if (DEBUG) log("Locale specific AM/PM string: '" + amPm + "'");
-                    int amPmIndex = clockText.indexOf(amPm);
-                    if (DEBUG) log("Original AM/PM index: " + amPmIndex);
-                    if (mAmPmHide && amPmIndex != -1) {
-                        clockText = clockText.replace(amPm, "").trim();
-                        if (DEBUG) log("AM/PM removed. New clockText: '" + clockText + "'");
-                        amPmIndex = -1;
-                    } else if (!mAmPmHide && !is24 && amPmIndex == -1) {
-                        // insert AM/PM if missing
-                        if(Locale.getDefault().equals(Locale.TAIWAN) || Locale.getDefault().equals(Locale.CHINA)) {
-                            clockText = amPm + " " + clockText;
-                        } else {
-                            clockText += " " + amPm;
-                        }
-                        amPmIndex = clockText.indexOf(amPm);
-                        if (DEBUG) log("AM/PM added. New clockText: '" + clockText + "'; New AM/PM index: " + amPmIndex);
-                    }
-                    CharSequence date = "";
-                    // apply date to statusbar clock, not the notification panel clock
-                    if (!mClockShowDate.equals("disabled") && isStatusbarClock) {
-                        SimpleDateFormat df = (SimpleDateFormat) SimpleDateFormat.getDateInstance(SimpleDateFormat.SHORT);
-                        String pattern = mClockShowDate.equals("localized") ?
-                                df.toLocalizedPattern().replaceAll(".?[Yy].?", "") : mClockShowDate;
-                        date = new SimpleDateFormat(pattern, Locale.getDefault()).format(calendar.getTime()) + " ";
-                    }
-                    clockText = date + clockText;
-                    CharSequence dow = "";
-                    // apply day of week only to statusbar clock, not the notification panel clock
-                    if (mClockShowDow != GravityBoxSettings.DOW_DISABLED && isStatusbarClock) {
-                        dow = getFormattedDow(calendar.getDisplayName(
-                                Calendar.DAY_OF_WEEK, Calendar.SHORT, Locale.getDefault())) + " ";
-                    }
-                    clockText = dow + clockText;
-                    SpannableStringBuilder sb = new SpannableStringBuilder(clockText);
-                    sb.setSpan(new RelativeSizeSpan(mDowSize), 0, dow.length() + date.length(),
-                            Spannable.SPAN_EXCLUSIVE_INCLUSIVE);
-                    if (amPmIndex > -1) {
-                        if(Locale.getDefault().equals(Locale.TAIWAN) || Locale.getDefault().equals(Locale.CHINA)) {
-                            sb.setSpan(new RelativeSizeSpan(mAmPmSize), dow.length() + date.length() + amPmIndex,
-                                    dow.length() + date.length() + amPmIndex + amPm.length(),
-                                    Spannable.SPAN_EXCLUSIVE_INCLUSIVE);
-                        } else {
-                            int offset = Character.isWhitespace(clockText.charAt(dow.length() + date.length() + amPmIndex - 1)) ?
-                                    1 : 0;
-                            sb.setSpan(new RelativeSizeSpan(mAmPmSize), dow.length() + date.length() + amPmIndex - offset,
-                                    dow.length() + date.length() + amPmIndex + amPm.length(),
-                                    Spannable.SPAN_EXCLUSIVE_INCLUSIVE);
-                        }
-                    }
-                    if (DEBUG) log("Final clockText: '" + sb + "'");
-                    param.setResult(sb);
+                    if (param.thisObject != mClock) return;
+                    renderClock();
                 }
             }));
         } catch (Throwable t) {
             GravityBox.log(TAG, t);
+        }
+    }
+
+    // Builds the full clock text ourselves (base time + am/pm handling + date + day-of-week +
+    // size spans) and writes it to the clock TextView. Owns the text entirely; called from the
+    // notifyTimeChanged hook, the seconds ticker and pref-change broadcasts.
+    @SuppressLint("SimpleDateFormat")
+    private void renderClock() {
+        try {
+            if (mClock == null) return;
+
+            // hide takes precedence and short-circuits
+            if (mClockHidden) {
+                if (mClock.getVisibility() != View.GONE) {
+                    mClock.setVisibility(View.GONE);
+                }
+                return;
+            }
+            if (mClock.getVisibility() != View.VISIBLE) {
+                mClock.setVisibility(View.VISIBLE);
+            }
+
+            Calendar calendar = Calendar.getInstance(TimeZone.getDefault());
+            boolean is24 = DateFormat.is24HourFormat(mClock.getContext());
+
+            // base time string, built by us (getSmallTime() no longer exists)
+            String skeleton = is24 ? (mShowSeconds ? "Hms" : "Hm")
+                                   : (mShowSeconds ? "hms" : "hm");
+            String clockText = new SimpleDateFormat(
+                    DateFormat.getBestDateTimePattern(Locale.getDefault(), skeleton),
+                    Locale.getDefault()).format(calendar.getTime());
+            if (DEBUG) log("Base clockText: '" + clockText + "'");
+
+            String amPm = calendar.getDisplayName(
+                    Calendar.AM_PM, Calendar.SHORT, Locale.getDefault());
+            if (mAmPmHide && amPm != null && clockText.contains(amPm)) {
+                clockText = clockText.replace(amPm, "").trim();
+            }
+
+            CharSequence date = "";
+            if (!mClockShowDate.equals("disabled")) {
+                SimpleDateFormat df = (SimpleDateFormat) SimpleDateFormat.getDateInstance(SimpleDateFormat.SHORT);
+                String pattern = mClockShowDate.equals("localized") ?
+                        df.toLocalizedPattern().replaceAll(".?[Yy].?", "") : mClockShowDate;
+                date = new SimpleDateFormat(pattern, Locale.getDefault()).format(calendar.getTime()) + " ";
+            }
+            clockText = date + clockText;
+
+            CharSequence dow = "";
+            if (mClockShowDow != GravityBoxSettings.DOW_DISABLED) {
+                dow = getFormattedDow(calendar.getDisplayName(
+                        Calendar.DAY_OF_WEEK, Calendar.SHORT, Locale.getDefault())) + " ";
+            }
+            clockText = dow + clockText;
+
+            SpannableStringBuilder sb = new SpannableStringBuilder(clockText);
+            sb.setSpan(new RelativeSizeSpan(mDowSize), 0, dow.length() + date.length(),
+                    Spannable.SPAN_EXCLUSIVE_INCLUSIVE);
+            // size the am/pm marker if it is still present (i.e. not hidden / not 24h)
+            if (!mAmPmHide && amPm != null) {
+                int amPmIndex = clockText.indexOf(amPm, dow.length() + date.length());
+                if (amPmIndex > -1) {
+                    int offset = (amPmIndex > 0 &&
+                            Character.isWhitespace(clockText.charAt(amPmIndex - 1))) ? 1 : 0;
+                    sb.setSpan(new RelativeSizeSpan(mAmPmSize), amPmIndex - offset,
+                            amPmIndex + amPm.length(), Spannable.SPAN_EXCLUSIVE_INCLUSIVE);
+                }
+            }
+            if (DEBUG) log("Final clockText: '" + sb + "'");
+            mClock.setText(sb);
+        } catch (Throwable t) {
+            GravityBox.log(TAG, "renderClock: ", t);
         }
     }
 
