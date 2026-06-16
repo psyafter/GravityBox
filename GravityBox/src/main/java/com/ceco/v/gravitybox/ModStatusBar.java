@@ -823,12 +823,14 @@ public class ModStatusBar {
                         if (mContext == null) {
                             mContext = sbv.getContext();
                             prepareBrightnessControl();
+                            prepareGestureDetector();
                         }
                         // A15: brightness control is driven here (StatusBar.interceptTouchEvent is gone)
                         if (mBrightnessControlEnabled) {
                             brightnessControl(ev, sbv);
                         }
-                        if (mDt2sEnabled && mDisablePeek && mGestureDetector != null) {
+                        // A15: double-tap-to-sleep no longer needs the "disable peek" workaround.
+                        if (mDt2sEnabled && mGestureDetector != null) {
                             mGestureDetector.onTouchEvent(ev);
                         }
                     }
