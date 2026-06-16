@@ -876,13 +876,16 @@ public class ModNavigationBar {
     private static void setMenuKeyVisibility() {
         try {
             final int disabledFlags = XposedHelpers.getIntField(mNavigationBarView, "mDisabledFlags");
+            // On One UI mDisabledFlags carries Samsung-specific bits (observed 0x1200000 with
+            // recents fully working), so the AOSP STATUS_BAR_DISABLE_RECENT check misfires and
+            // permanently hides the menu key. Skip that check on Samsung.
             boolean visible = mAlwaysShowMenukey && !mDpadKeysVisible &&
-                    (disabledFlags & STATUS_BAR_DISABLE_RECENT) == 0;
+                    (Utils.isSamsungRom() || (disabledFlags & STATUS_BAR_DISABLE_RECENT) == 0);
             for (NavbarViewInfo navbarViewInfo : mNavbarViewInfo) {
                 if (navbarViewInfo != null && navbarViewInfo.menuKey != null) {
-                    visible &= !isThereAChildVisible((ViewGroup) navbarViewInfo.menuKey.getParent(),
+                    boolean vis = visible && !isThereAChildVisible((ViewGroup) navbarViewInfo.menuKey.getParent(),
                             navbarViewInfo.menuKey);
-                    navbarViewInfo.menuKey.setVisibility(visible ? View.VISIBLE : View.INVISIBLE);
+                    navbarViewInfo.menuKey.setVisibility(vis ? View.VISIBLE : View.INVISIBLE);
                 }
             }
         } catch (Throwable t) {
