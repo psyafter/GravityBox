@@ -16,12 +16,9 @@ package com.ceco.v.gravitybox;
 
 import android.content.ContentResolver;
 import android.content.Context;
-import android.content.res.Resources;
 import android.database.ContentObserver;
 import android.os.Handler;
 import android.provider.Settings;
-import android.view.View;
-import android.view.WindowManager;
 
 import com.ceco.v.gravitybox.managers.BroadcastMediator;
 import com.ceco.v.gravitybox.managers.FrameworkManagers;
@@ -34,8 +31,7 @@ import de.robv.android.xposed.XposedHelpers;
 public class ModExpandedDesktop {
     private static final String TAG = "GB:ModExpandedDesktop";
     private static final String CLASS_PHONE_WINDOW_MANAGER = "com.android.server.policy.PhoneWindowManager";
-    private static final String CLASS_WINDOW_MANAGER_FUNCS = "com.android.server.policy.WindowManagerPolicy.WindowManagerFuncs";
-    private static final String CLASS_IWINDOW_MANAGER = "android.view.IWindowManager";
+    private static final String CLASS_WINDOW_MANAGER_FUNCS = "com.android.server.policy.WindowManagerPolicy$WindowManagerFuncs";
     private static final String CLASS_WINDOW_STATE = "com.android.server.wm.WindowState";
     private static final String CLASS_POLICY_CONTROL = "com.android.server.wm.PolicyControl";
     private static final String CLASS_DISPLAY_POLICY = "com.android.server.wm.DisplayPolicy";
@@ -44,28 +40,11 @@ public class ModExpandedDesktop {
 
     public static final String SETTING_EXPANDED_DESKTOP_STATE = "gravitybox_expanded_desktop_state";
 
-    private static class ViewConst {
-        static final int STATUS_BAR_TRANSLUCENT = 0x40000000;
-        static final int NAVIGATION_BAR_TRANSLUCENT = 0x80000000;
-    }
-
-    private static class NavbarDimensions {
-        int wPort, hPort, hPortFrame, hLand, hLandFrame;
-        NavbarDimensions(int wp, int hp, int hpf, int hl, int hlf) {
-            wPort = wp;
-            hPort = hp;
-            hPortFrame = hpf;
-            hLand = hl;
-            hLandFrame = hlf;
-        }
-    }
-
     private static Context mContext;
     private static Object mPhoneWindowManager;
     private static SettingsObserver mSettingsObserver;
     private static boolean mExpandedDesktop;
     private static int mExpandedDesktopMode;
-    private static NavbarDimensions mNavbarDimensions;
 
     private static void log(String message) {
         XposedBridge.log(TAG + ": " + message);
@@ -84,7 +63,7 @@ public class ModExpandedDesktop {
             updateSettings();
         }
 
-        @Override 
+        @Override
         public void onChange(boolean selfChange) {
             updateSettings();
         }
@@ -102,11 +81,15 @@ public class ModExpandedDesktop {
         }
     };
 
+    // A15/One UI: the old SYSTEM_UI_FLAG / getSystemUiVisibility approach to drive the bars is
+    // gone; immersive is gated by PolicyControl.shouldApplyImmersive{Status,Navigation} and
+    // realised by InsetsPolicy. We only re-evaluate the system bar attributes here; the actual
+    // hiding is forced from the PolicyControl hooks below.
     private static void updateSettings() {
         if (mContext == null || mPhoneWindowManager == null) return;
 
         try {
-            final boolean expandedDesktop = Settings.Global.getInt(mContext.getContentResolver(), 
+            final boolean expandedDesktop = Settings.Global.getInt(mContext.getContentResolver(),
                     SETTING_EXPANDED_DESKTOP_STATE, 0) == 1;
             if (mExpandedDesktopMode == GravityBoxSettings.ED_DISABLED && expandedDesktop) {
                     Settings.Global.putInt(mContext.getContentResolver(),
@@ -114,90 +97,13 @@ public class ModExpandedDesktop {
                     return;
             }
 
-            if (mExpandedDesktop != expandedDesktop) {
-                mExpandedDesktop = expandedDesktop;
-            }
+            mExpandedDesktop = expandedDesktop;
 
-            Object displayPolicy = XposedHelpers.getObjectField(mPhoneWindowManager, "mDefaultDisplayPolicy");
-            Object displayRotation = XposedHelpers.callMethod(
-                    XposedHelpers.getObjectField(displayPolicy, "mDisplayContent"),
-                    "getDisplayRotation");
-
-            int[] navigationBarWidthForRotation = (int[]) XposedHelpers.getObjectField(
-                    displayPolicy, "mNavigationBarWidthForRotationDefault");
-            int[] navigationBarHeightForRotation = (int[]) XposedHelpers.getObjectField(
-                    displayPolicy, "mNavigationBarHeightForRotationDefault");
-            int[] navigationBarFrameHeightForRotation = (int[]) XposedHelpers.getObjectField(
-                    displayPolicy, "mNavigationBarFrameHeightForRotationDefault");
-            final int portraitRotation = (int) XposedHelpers.callMethod(displayRotation, "getPortraitRotation");
-            final int upsideDownRotation = (int) XposedHelpers.callMethod(displayRotation, "getUpsideDownRotation");
-            final int landscapeRotation = (int) XposedHelpers.callMethod(displayRotation, "getLandscapeRotation");
-            final int seascapeRotation = (int) XposedHelpers.callMethod(displayRotation, "getSeascapeRotation");
-
-            if (isNavbarHidden()) {
-                navigationBarWidthForRotation[portraitRotation]
-                        = navigationBarWidthForRotation[upsideDownRotation]
-                        = navigationBarWidthForRotation[landscapeRotation]
-                        = navigationBarWidthForRotation[seascapeRotation]
-                        = navigationBarHeightForRotation[portraitRotation]
-                        = navigationBarHeightForRotation[upsideDownRotation]
-                        = navigationBarHeightForRotation[landscapeRotation]
-                        = navigationBarHeightForRotation[seascapeRotation]
-                        = navigationBarFrameHeightForRotation[portraitRotation]
-                        = navigationBarFrameHeightForRotation[upsideDownRotation]
-                        = navigationBarFrameHeightForRotation[landscapeRotation]
-                        = navigationBarFrameHeightForRotation[seascapeRotation] = 0;
-            } else if (mNavbarDimensions != null) {
-                navigationBarHeightForRotation[portraitRotation] =
-                navigationBarHeightForRotation[upsideDownRotation] =
-                        mNavbarDimensions.hPort;
-                navigationBarHeightForRotation[landscapeRotation] =
-                navigationBarHeightForRotation[seascapeRotation] =
-                        mNavbarDimensions.hLand;
-
-                navigationBarFrameHeightForRotation[portraitRotation] =
-                navigationBarFrameHeightForRotation[upsideDownRotation] =
-                                mNavbarDimensions.hPortFrame;
-                navigationBarFrameHeightForRotation[landscapeRotation] =
-                navigationBarFrameHeightForRotation[seascapeRotation] =
-                                mNavbarDimensions.hLandFrame;
-
-                navigationBarWidthForRotation[portraitRotation] =
-                navigationBarWidthForRotation[upsideDownRotation] =
-                navigationBarWidthForRotation[landscapeRotation] =
-                navigationBarWidthForRotation[seascapeRotation] =
-                        mNavbarDimensions.wPort;
-            }
-
-            XposedHelpers.callMethod(mPhoneWindowManager, "updateRotation", false);
-        } catch (Throwable t) {
-            GravityBox.log(TAG, t);
-        }
-    }
-
-    private static void updateNavbarDimensions(boolean updateSettings) {
-        if (mContext == null) return;
-        try {
-            Resources res = mContext.getResources();
-            int resWidthId = res.getIdentifier(
-                    "navigation_bar_width", "dimen", "android");
-            int resHeightId = res.getIdentifier(
-                    "navigation_bar_height", "dimen", "android");
-            int resHeightFrameId = res.getIdentifier(
-                    "navigation_bar_frame_height", "dimen", "android");
-            int resHeightLandscapeId = res.getIdentifier(
-                    "navigation_bar_height_landscape", "dimen", "android");
-            int resHeightLandscapeFrameId = res.getIdentifier(
-                    "navigation_bar_frame_height_landscape", "dimen", "android");
-            mNavbarDimensions = new NavbarDimensions(
-                    res.getDimensionPixelSize(resWidthId),
-                    res.getDimensionPixelSize(resHeightId),
-                    res.getDimensionPixelSize(resHeightFrameId),
-                    res.getDimensionPixelSize(resHeightLandscapeId),
-                    res.getDimensionPixelSize(resHeightLandscapeFrameId));
-            if (updateSettings) {
-                updateSettings();
-            }
+            // kick the default display policy to recompute the system bar state so the change
+            // takes effect immediately instead of on the next natural relayout
+            Object displayPolicy = XposedHelpers.getObjectField(
+                    mPhoneWindowManager, "mDefaultDisplayPolicy");
+            XposedHelpers.callMethod(displayPolicy, "updateSystemBarAttributes");
         } catch (Throwable t) {
             GravityBox.log(TAG, t);
         }
@@ -215,8 +121,9 @@ public class ModExpandedDesktop {
                 GravityBox.log(TAG, "Invalid value for PREF_KEY_EXPANDED_DESKTOP preference");
             }
 
+            // A15: PhoneWindowManager.init lost the IWindowManager arg -> init(Context, Funcs)
             XposedHelpers.findAndHookMethod(classPhoneWindowManager, "init",
-                Context.class, CLASS_IWINDOW_MANAGER, CLASS_WINDOW_MANAGER_FUNCS, new XC_MethodHook() {
+                Context.class, CLASS_WINDOW_MANAGER_FUNCS, new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     try {
@@ -238,68 +145,43 @@ public class ModExpandedDesktop {
                 }
             });
 
+            // A15: PolicyControl is the immersive policy-override layer. Forcing these two
+            // predicates true is the modern equivalent of the old SYSTEM_UI_FLAG injection
+            // (and of `settings put global policy_control immersive.*`).
+            final Class<?> classPolicyControl = XposedHelpers.findClass(CLASS_POLICY_CONTROL, classLoader);
+            XposedHelpers.findAndHookMethod(classPolicyControl, "shouldApplyImmersiveStatus",
+                    CLASS_WINDOW_STATE, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (isStatusbarImmersive()) {
+                        param.setResult(true);
+                    }
+                }
+            });
+
+            XposedHelpers.findAndHookMethod(classPolicyControl, "shouldApplyImmersiveNavigation",
+                    CLASS_WINDOW_STATE, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (isNavbarImmersive() || isNavbarHidden()) {
+                        param.setResult(true);
+                    }
+                }
+            });
+
+            // re-assert immersive after configuration changes (rotation, density, etc.)
             XposedHelpers.findAndHookMethod(CLASS_DISPLAY_POLICY, classLoader,
                     "onConfigurationChanged", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
-                    updateNavbarDimensions(isNavbarHidden());
+                    updateSettings();
                 }
             });
 
-            XposedHelpers.findAndHookMethod(CLASS_POLICY_CONTROL, classLoader,"getSystemUiVisibility",
-                    CLASS_WINDOW_STATE, WindowManager.LayoutParams.class, new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    int vis = (int) param.getResult();
-                    if (isStatusbarImmersive()) {
-                        vis |= View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY |
-                                View.SYSTEM_UI_FLAG_FULLSCREEN |
-                                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN;
-                        vis &= ~(View.SYSTEM_UI_FLAG_LAYOUT_STABLE |
-                                 ViewConst.STATUS_BAR_TRANSLUCENT);
-                    }
-                    if (isNavbarImmersive() || isNavbarHidden()) {
-                        vis |= View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION;
-                        vis &= ~(View.SYSTEM_UI_FLAG_LAYOUT_STABLE |
-                                 ViewConst.NAVIGATION_BAR_TRANSLUCENT);
-                    }
-                    param.setResult(vis);
-                }
-            });
-
-            XposedHelpers.findAndHookMethod(CLASS_POLICY_CONTROL, classLoader, "getWindowFlags",
-                    CLASS_WINDOW_STATE, WindowManager.LayoutParams.class, new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    int flags = (int) param.getResult();
-                    if (isStatusbarImmersive()) {
-                        flags |= WindowManager.LayoutParams.FLAG_FULLSCREEN;
-                        flags &= ~(WindowManager.LayoutParams.FLAG_FORCE_NOT_FULLSCREEN |
-                                    WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS);
-                    }
-                    if (isNavbarImmersive() || isNavbarHidden()) {
-                        flags &= ~WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION;
-                    }
-                    param.setResult(flags);
-                }
-            });
-
-            XposedHelpers.findAndHookMethod(CLASS_POLICY_CONTROL, classLoader, "adjustClearableFlags",
-                    CLASS_WINDOW_STATE, int.class, new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    int clearableFlags = (int) param.getResult();
-                    if (isStatusbarImmersive()) {
-                        clearableFlags &= ~View.SYSTEM_UI_FLAG_FULLSCREEN;
-                    }
-                    param.setResult(clearableFlags);
-                }
-            });
-
+            // A15: requestTransientBars gained a boolean arg. When the navbar is in "hidden"
+            // (permanent) mode, swallow transient requests so a swipe does not reveal it.
             XposedHelpers.findAndHookMethod(CLASS_DISPLAY_POLICY, classLoader, "requestTransientBars",
-                    CLASS_WINDOW_STATE, new XC_MethodHook() {
+                    CLASS_WINDOW_STATE, boolean.class, new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
                     if (param.args[0] == XposedHelpers.getObjectField(param.thisObject, "mNavigationBar")
@@ -328,7 +210,7 @@ public class ModExpandedDesktop {
     }
 
     private static boolean isNavbarHidden() {
-        return (mExpandedDesktop && 
+        return (mExpandedDesktop &&
                     (mExpandedDesktopMode == GravityBoxSettings.ED_HIDE_NAVBAR ||
                             mExpandedDesktopMode == GravityBoxSettings.ED_SEMI_IMMERSIVE));
     }
