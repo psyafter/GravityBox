@@ -78,12 +78,17 @@ public class StatusbarClock implements BroadcastMediator.Receiver {
         int gravity;
         int paddingStart;
         int paddingEnd;
-        ClockPositionInfo(ViewGroup parent, int position, int gravity, int paddingStart, int paddingEnd) {
+        // A15/One UI: Samsung ships dedicated middle_clock_container / right_clock_container that
+        // are GONE by default. Toggle their visibility as the clock enters/leaves them.
+        boolean toggleVisibility;
+        ClockPositionInfo(ViewGroup parent, int position, int gravity, int paddingStart,
+                          int paddingEnd, boolean toggleVisibility) {
             this.parent = parent;
             this.position = position;
             this.gravity = gravity;
             this.paddingStart = paddingStart;
             this.paddingEnd = paddingEnd;
+            this.toggleVisibility = toggleVisibility;
         }
     }
 
@@ -121,24 +126,25 @@ public class StatusbarClock implements BroadcastMediator.Receiver {
             mPositions.put(ClockPosition.DEFAULT,
                     new ClockPositionInfo(parentOriginal, parentOriginal.indexOfChild(mClock),
                             mClock.getGravity(), mClock.getPaddingStart(),
-                            mClock.getPaddingEnd()));
+                            mClock.getPaddingEnd(), false));
         }
         if (parentLeft != null) {
             mPositions.put(ClockPosition.LEFT,
                     new ClockPositionInfo(parentLeft, 0,
                             Gravity.START | Gravity.CENTER_VERTICAL,
-                            mClock.getPaddingStart(), mClock.getPaddingEnd()));
+                            mClock.getPaddingStart(), mClock.getPaddingEnd(),
+                            parentLeft != parentOriginal));
         }
         if (parentRight != null) {
             mPositions.put(ClockPosition.RIGHT,
                     new ClockPositionInfo(parentRight, -1,
                             Gravity.END | Gravity.CENTER_VERTICAL,
-                            mClock.getPaddingEnd(), mClock.getPaddingStart()));
+                            mClock.getPaddingEnd(), mClock.getPaddingStart(), true));
         }
         if (parentCenter != null) {
             mPositions.put(ClockPosition.CENTER,
                     new ClockPositionInfo(parentCenter, -1, Gravity.CENTER,
-                            0, 0));
+                            0, 0, true));
         }
 
         // use this additional field to identify the instance of Clock that resides in status bar
@@ -171,22 +177,29 @@ public class StatusbarClock implements BroadcastMediator.Receiver {
 
     public void moveToPosition(ClockPosition position) {
         if (mClock != null && mCurrentPosition != position) {
+            ClockPositionInfo info = mPositions.get(position);
+            if (info == null) {
+                log("Unsupported clock position: " + position);
+                return;
+            }
             for (ClockPositionInfo i : mPositions.values()) {
                 i.parent.removeView(mClock);
-            }
-            ClockPositionInfo info = mPositions.get(position);
-            if (info != null) {
-                mClock.setPaddingRelative(info.paddingStart, 0, info.paddingEnd, 0);
-                mClock.setGravity(info.gravity);
-                if (info.position == -1) {
-                    info.parent.addView(mClock);
-                } else {
-                    info.parent.addView(mClock, info.position);
+                // hide Samsung's dedicated containers we are not moving into
+                if (i.toggleVisibility && i != info) {
+                    i.parent.setVisibility(View.GONE);
                 }
-                mCurrentPosition = position;
-            } else {
-                log("Unsupported clock position: " + position);
             }
+            mClock.setPaddingRelative(info.paddingStart, 0, info.paddingEnd, 0);
+            mClock.setGravity(info.gravity);
+            if (info.toggleVisibility) {
+                info.parent.setVisibility(View.VISIBLE);
+            }
+            if (info.position == -1) {
+                info.parent.addView(mClock);
+            } else {
+                info.parent.addView(mClock, info.position);
+            }
+            mCurrentPosition = position;
         }
     }
 

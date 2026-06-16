@@ -289,16 +289,17 @@ public class ModStatusBar {
         return (ViewGroup) XposedHelpers.getObjectField(notifPanel, "mKeyguardStatusBar");
     }
 
-    // True if the view has a PhoneStatusBarView ancestor, i.e. it lives in the collapsed
-    // status bar (not the keyguard status bar or the QS-panel header).
-    private static boolean isInPhoneStatusBar(View v) {
+    // Returns the PhoneStatusBarView ancestor of the given view, or null. Used to (a) confirm
+    // a clock lives in the collapsed status bar (not the keyguard / QS-panel) and (b) resolve
+    // Samsung's clock position containers from the statusbar root.
+    private static ViewGroup getPhoneStatusBar(View v) {
         ViewParent p = v.getParent();
         int guard = 0;
         while (p instanceof View && guard++ < 25) {
-            if (CLASS_PHONE_STATUSBAR_VIEW.equals(p.getClass().getName())) return true;
+            if (CLASS_PHONE_STATUSBAR_VIEW.equals(p.getClass().getName())) return (ViewGroup) p;
             p = p.getParent();
         }
-        return false;
+        return null;
     }
 
     private static void prepareLayoutStatusBar() {
@@ -667,20 +668,48 @@ public class ModStatusBar {
                                 int clockId = ctx.getResources().getIdentifier(
                                         "clock", "id", PACKAGE_NAME);
                                 if (clockId == 0 || clock.getId() != clockId) return;
-                                if (!isInPhoneStatusBar(clock)) return;
+                                ViewGroup sbRoot = getPhoneStatusBar(clock);
+                                if (sbRoot == null) return;
+                                Resources res = ctx.getResources();
+                                // Several QSClockIndicatorView instances with id/clock live under
+                                // a PhoneStatusBarView; the real, time-updating statusbar clock is
+                                // the one parented directly by left_clock_container. Capturing any
+                                // other instance grabs a stale "12:00" clock.
+                                int leftId = res.getIdentifier("left_clock_container", "id", PACKAGE_NAME);
+                                ViewParent clockParent = clock.getParent();
+                                if (!(clockParent instanceof View)
+                                        || ((View) clockParent).getId() != leftId) return;
                                 if (mClock != null && mClock.getClock() == clock) return;
+                                // keep an existing live capture instead of swapping instances
+                                if (mClock != null && mClock.getClock() != null
+                                        && mClock.getClock().isAttachedToWindow()) return;
                                 if (mContext == null) mContext = ctx;
 
                                 if (mClock != null) {
                                     mClock.destroy();
                                     mClock = null;
                                 }
+                                // Samsung ships dedicated clock containers in the statusbar:
+                                // left_clock_container (default home), middle_clock_container
+                                // (CENTER) and right_clock_container (RIGHT). The latter two are
+                                // GONE until the clock is moved into them.
+                                ViewGroup leftContainer = (ViewGroup) clockParent;
+                                ViewGroup centerContainer = sbRoot.findViewById(
+                                        res.getIdentifier("middle_clock_container", "id", PACKAGE_NAME));
+                                ViewGroup rightContainer = sbRoot.findViewById(
+                                        res.getIdentifier("right_clock_container", "id", PACKAGE_NAME));
                                 mClock = new StatusbarClock(mPrefs);
-                                mClock.setClock((ViewGroup) clock.getParent(),
-                                        null, null, null, clock);
-                                setClockPosition(mPrefs.getString(
+                                mClock.setClock(leftContainer, leftContainer,
+                                        rightContainer, centerContainer, clock);
+                                // Defer the reparent: we are inside the clock's own
+                                // onAttachedToWindow, and moving the view mid-attach does not
+                                // stick. post() applies it once the attach settles.
+                                final String pos = mPrefs.getString(
                                         GravityBoxSettings.PREF_KEY_STATUSBAR_CLOCK_POSITION,
-                                        "DEFAULT"));
+                                        "DEFAULT");
+                                clock.post(new Runnable() {
+                                    @Override public void run() { setClockPosition(pos); }
+                                });
                                 if (DEBUG) log("Statusbar clock captured via QSClock.onAttachedToWindow");
                             } catch (Throwable t) {
                                 GravityBox.log(TAG, "QSClock.onAttachedToWindow: ", t);
