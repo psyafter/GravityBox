@@ -25,6 +25,7 @@ import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.PorterDuff;
+import android.graphics.PorterDuffColorFilter;
 import android.graphics.Rect;
 import android.graphics.Region;
 import android.graphics.drawable.BitmapDrawable;
@@ -540,6 +541,25 @@ public class ModNavigationBar {
             }
         }
 
+        // One UI: KeyButtonDrawable colours its icon via setColorFilter() inside
+        // setDarkIntensity(), and Samsung re-applies it constantly (overwriting any filter we
+        // set from the bar-level tint hook). Override right after to force our key color.
+        try {
+            XposedHelpers.findAndHookMethod(CLASS_KEY_BUTTON_DRAWABLE, classLoader,
+                    "setDarkIntensity", float.class, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (mNavbarColorsEnabled) {
+                        Drawable d = (Drawable) param.thisObject;
+                        d.setColorFilter(new PorterDuffColorFilter(mKeyColor, PorterDuff.Mode.SRC_ATOP));
+                        d.invalidateSelf();
+                    }
+                }
+            });
+        } catch (Throwable t) {
+            GravityBox.log(TAG, "Error hooking KeyButtonDrawable.setDarkIntensity:", t);
+        }
+
         try {
             XposedHelpers.findAndHookMethod(CLASS_CONTEXTUAL_BTN_GRP, classLoader,
                     "setButtonVisibility", int.class, boolean.class, new XC_MethodHook() {
@@ -973,7 +993,7 @@ public class ModNavigationBar {
     private static void setKeyColor() {
         try {
             View v = (View) XposedHelpers.getObjectField(mNavigationBarView, "mCurrentView");
-            ViewGroup navButtons = v.findViewById(
+            ViewGroup navButtons = v == null ? null : (ViewGroup) v.findViewById(
                     mResources.getIdentifier("nav_buttons", "id", PACKAGE_NAME));
             setKeyColorRecursive(navButtons);
         } catch (Throwable t) {
@@ -990,6 +1010,9 @@ public class ModNavigationBar {
                 setKeyColorRecursive((ViewGroup) child);
             } else if (child instanceof ImageView) {
                 ImageView imgv = (ImageView)vg.getChildAt(i);
+                // System KeyButtonView icons (KeyButtonDrawable) are recoloured via the
+                // setDarkIntensity hook below; the color filter here handles other ImageViews
+                // such as GravityBox's own custom keys (BitmapDrawable).
                 if (mNavbarColorsEnabled) {
                     imgv.setColorFilter(mKeyColor, PorterDuff.Mode.SRC_ATOP);
                 } else {
