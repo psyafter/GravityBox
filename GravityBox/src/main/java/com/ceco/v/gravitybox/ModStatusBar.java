@@ -406,6 +406,15 @@ public class ModStatusBar {
                 mStatusBarView.addView(mLayoutCenter);
             }
 
+            // The progress controller is the shared listener registry for the battery bar and
+            // traffic meter (and the download progress bar). It used to be created in the dead
+            // makeStatusBarView hook; create it lazily here. Its ctor is hook-free, so it is safe
+            // on A15; progress *data* still needs the notification hooks (dead), so for now it only
+            // serves as the registry and the battery bar shows battery (not download progress).
+            if (mProgressBarCtrl == null) {
+                mProgressBarCtrl = new ProgressBarController(mContext, mPrefs);
+            }
+            prepareBatteryBar(ContainerType.STATUSBAR);
             prepareTrafficMeter();
             if (DEBUG) log("prepareLayoutStatusBarA15: anchors ready (left=" + (mLeftArea != null)
                     + " right=" + (mRightArea != null) + " center=" + (centerContainer != null) + ")");
