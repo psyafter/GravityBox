@@ -20,6 +20,8 @@ import java.util.List;
 
 import com.ceco.v.gravitybox.ModStatusBar.ContainerType;
 import com.ceco.v.gravitybox.managers.BroadcastMediator;
+import com.ceco.v.gravitybox.managers.SysUiBatteryInfoManager.BatteryData;
+import com.ceco.v.gravitybox.managers.SysUiBatteryInfoManager.BatteryStatusListener;
 import com.ceco.v.gravitybox.managers.SysUiManagers;
 
 import android.content.Intent;
@@ -43,7 +45,7 @@ import de.robv.android.xposed.XSharedPreferences;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 
-public class BatteryStyleController implements BroadcastMediator.Receiver {
+public class BatteryStyleController implements BroadcastMediator.Receiver, BatteryStatusListener {
     private static final String TAG = "GB:BatteryStyleController";
     public static final String PACKAGE_NAME = "com.android.systemui";
     public static final String CLASS_BATTERY_CONTROLLER = 
@@ -92,6 +94,12 @@ public class BatteryStyleController implements BroadcastMediator.Receiver {
             initLayout();
             createHooks();
             updateBatteryStyle();
+            // A15/One UI: the AOSP BatteryControllerImpl.onReceive hook (the legacy trigger to
+            // re-apply the style / re-hide the stock battery on every battery change) does not
+            // exist here. Drive it from the live SysUiBatteryInfoManager instead.
+            if (SysUiManagers.BatteryInfoManager != null) {
+                SysUiManagers.BatteryInfoManager.registerListener(this);
+            }
         }
 
         SysUiManagers.BroadcastMediator.subscribe(this,
@@ -103,6 +111,9 @@ public class BatteryStyleController implements BroadcastMediator.Receiver {
 
     public void destroy() {
         SysUiManagers.BroadcastMediator.unsubscribe(this);
+        if (SysUiManagers.BatteryInfoManager != null) {
+            SysUiManagers.BatteryInfoManager.unregisterListener(this);
+        }
         for (Unhook hook : mHooks) {
             hook.unhook();
         }
@@ -237,6 +248,13 @@ public class BatteryStyleController implements BroadcastMediator.Receiver {
                 GravityBox.log(TAG, "Error in startPowerUsageSummary:", t);
             }
         }
+    }
+
+    @Override
+    public void onBatteryStatusChanged(BatteryData batteryData) {
+        // re-apply style / re-hide the stock battery on each battery change (the alive A15
+        // replacement for the AOSP BatteryControllerImpl.onReceive hook)
+        updateBatteryStyle();
     }
 
     private void updateBatteryStyle() {

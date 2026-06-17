@@ -414,6 +414,9 @@ public class ModStatusBar {
             if (mProgressBarCtrl == null) {
                 mProgressBarCtrl = new ProgressBarController(mContext, mPrefs);
             }
+            if (mPrefs.getBoolean(GravityBoxSettings.PREF_KEY_BATTERY_TWEAKS_ENABLED, true)) {
+                prepareBatteryStyle(ContainerType.STATUSBAR);
+            }
             prepareBatteryBar(ContainerType.STATUSBAR);
             prepareTrafficMeter();
             if (DEBUG) log("prepareLayoutStatusBarA15: anchors ready (left=" + (mLeftArea != null)
