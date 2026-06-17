@@ -59,11 +59,21 @@ public class ModLockscreen {
     private static final String CLASS_KG_PASSWORD_VIEW = CLASS_PATH + ".KeyguardPasswordView";
     private static final String CLASS_KG_PIN_VIEW = CLASS_PATH + ".KeyguardPINView";
     private static final String CLASS_KG_PASSWORD_TEXT_VIEW = CLASS_PATH + ".PasswordTextView";
-    public static final String CLASS_KGVIEW_MEDIATOR = "com.android.systemui.keyguard.KeyguardViewMediator";
-    private static final String CLASS_SB_WINDOW_CONTROLLER = "com.android.systemui.statusbar.phone.StatusBarWindowController";
+    // A15/One UI 7: the live mediator is Samsung's SafeUIKeyguardViewMediator (extends the AOSP
+    // KeyguardViewMediator). setupLocked() and playSound(int) are DECLARED on the subclass (the base
+    // lacks setupLocked()), so we must hook the subclass; inherited fields (mContext, mUpdateMonitor)
+    // still resolve via the hierarchy walk.
+    public static final String CLASS_KGVIEW_MEDIATOR = "com.android.systemui.keyguard.SafeUIKeyguardViewMediator";
+    // A15/One UI: shouldEnableKeyguardScreenRotation() moved off StatusBarWindowController
+    // (the old class is gone) onto com.android.systemui.util.DeviceState and now takes a
+    // Context arg: shouldEnableKeyguardScreenRotation(Context)Z (verified by dexdump).
+    private static final String CLASS_DEVICE_STATE = "com.android.systemui.util.DeviceState";
     private static final String CLASS_KG_VIEW_MANAGER = "com.android.systemui.statusbar.phone.StatusBarKeyguardViewManager";
-    private static final String CLASS_CARRIER_TEXT_CTRL = CLASS_PATH + ".CarrierTextController";
-    private static final String CLASS_CARRIER_TEXT_INFO = CLASS_CARRIER_TEXT_CTRL + ".CarrierTextCallbackInfo";
+    // A15/One UI: carrier text plumbing moved from CarrierTextController to CarrierTextManager;
+    // postToCallback(CarrierTextManager$CarrierTextCallbackInfo) carries the 'carrierText' field
+    // (CharSequence). CarrierTextController no longer has postToCallback (verified by dexdump).
+    private static final String CLASS_CARRIER_TEXT_MGR = CLASS_PATH + ".CarrierTextManager";
+    private static final String CLASS_CARRIER_TEXT_INFO = CLASS_CARRIER_TEXT_MGR + ".CarrierTextCallbackInfo";
     private static final String CLASS_NOTIF_ROW = "com.android.systemui.statusbar.notification.row.ExpandableNotificationRow";
     private static final String CLASS_KG_BOTTOM_AREA_VIEW = "com.android.systemui.statusbar.phone.KeyguardBottomAreaView";
     private static final String CLASS_SCRIM_CONTROLLER = "com.android.systemui.statusbar.phone.ScrimController";
@@ -151,22 +161,23 @@ public class ModLockscreen {
 
     @SuppressWarnings({ "rawtypes", "unchecked" })
     public static void init(final XSharedPreferences prefs, final XSharedPreferences qhPrefs, final ClassLoader classLoader) {
-        // main setup - mandatory - nothing else will work if this fails
-        final Class<?> kgPasswordViewClass;
-        final Class<?> kgPINViewClass;
-        final Class<?> kgPasswordTextViewClass;
-        final Class<?> kgViewMediatorClass;
-        final Class<?> sbWindowControllerClass;
+        // main setup. §13 hardening: resolve classes with findClassIfExists and null-guard each
+        // hook so one dead class/method cannot abort the rest of the lockscreen tweaks.
+        mPrefs = prefs;
+        mQuietHours = new QuietHours(qhPrefs);
+
+        // A15/One UI (verified by dexdump): all five base classes still exist.
+        //   KeyguardPasswordView, KeyguardPINView, PasswordTextView, KeyguardViewMediator alive.
+        //   StatusBarWindowController is GONE -> rotation hook uses DeviceState instead (below).
+        final Class<?> kgPasswordViewClass = XposedHelpers.findClassIfExists(CLASS_KG_PASSWORD_VIEW, classLoader);
+        final Class<?> kgPINViewClass = XposedHelpers.findClassIfExists(CLASS_KG_PIN_VIEW, classLoader);
+        final Class<?> kgPasswordTextViewClass = XposedHelpers.findClassIfExists(CLASS_KG_PASSWORD_TEXT_VIEW, classLoader);
+        final Class<?> kgViewMediatorClass = XposedHelpers.findClassIfExists(CLASS_KGVIEW_MEDIATOR, classLoader);
+        final Class<?> deviceStateClass = XposedHelpers.findClassIfExists(CLASS_DEVICE_STATE, classLoader);
+
+        // HOOK 1: KeyguardViewMediator.setupLocked() — ALIVE. fields mContext, mUpdateMonitor present.
         try {
-            mPrefs = prefs;
-            mQuietHours = new QuietHours(qhPrefs);
-
-            kgPasswordViewClass = XposedHelpers.findClass(CLASS_KG_PASSWORD_VIEW, classLoader);
-            kgPINViewClass = XposedHelpers.findClass(CLASS_KG_PIN_VIEW, classLoader);
-            kgPasswordTextViewClass = XposedHelpers.findClass(CLASS_KG_PASSWORD_TEXT_VIEW, classLoader);
-            kgViewMediatorClass = XposedHelpers.findClass(CLASS_KGVIEW_MEDIATOR, classLoader);
-            sbWindowControllerClass = XposedHelpers.findClass(CLASS_SB_WINDOW_CONTROLLER, classLoader);
-
+            if (kgViewMediatorClass == null) throw new Throwable("KeyguardViewMediator not found");
             XposedHelpers.findAndHookMethod(kgViewMediatorClass, "setupLocked", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(final MethodHookParam param) throws Throwable {
@@ -207,13 +218,19 @@ public class ModLockscreen {
                 }
             });
         } catch (Throwable t) {
-            GravityBox.log(TAG, "Error setting up Lockscreen tweaks:", t);
-            return;
+            GravityBox.log(TAG, "hook setupLocked", t);
         }
 
-        // custom background
+        // HOOK 2: custom lockscreen background via NotificationMediaManager.finishUpdateMediaMetaData.
+        // DEFERRED (A15): NotificationMediaManager still exists but the whole backdrop machinery is
+        // gone — no finishUpdateMediaMetaData(boolean,boolean,Bitmap) method and no mBackdrop /
+        // mBackdropBack / mStatusBarStateController fields (verified by dexdump; class now exposes
+        // only updateMediaMetaData(List)/(MediaListener) and a NotifPipeline). The lockscreen media
+        // backdrop moved to the Compose/MediaHost stack. Guarded so init cannot abort.
         try {
-            XposedHelpers.findAndHookMethod(CLASS_NOTIF_MEDIA_MANAGER, classLoader,
+            Class<?> notifMediaMgrClass = XposedHelpers.findClassIfExists(CLASS_NOTIF_MEDIA_MANAGER, classLoader);
+            if (notifMediaMgrClass == null) throw new Throwable("NotificationMediaManager not found");
+            XposedHelpers.findAndHookMethod(notifMediaMgrClass,
                     "finishUpdateMediaMetaData", boolean.class, boolean.class,
                     Bitmap.class, new XC_MethodHook() {
                 @Override
@@ -261,16 +278,19 @@ public class ModLockscreen {
                 }
             });
         } catch (Throwable t) {
-            GravityBox.log(TAG, "Error setting up updateMediaMetaData hook:", t);
+            GravityBox.log(TAG, "hook finishUpdateMediaMetaData", t);
         }
 
-        // lockscreen rotation
+        // HOOK 3: lockscreen rotation. REMAP (A15): shouldEnableKeyguardScreenRotation() moved from
+        // the (now deleted) StatusBarWindowController to com.android.systemui.util.DeviceState and
+        // now takes a Context: shouldEnableKeyguardScreenRotation(Context)Z (verified by dexdump).
         try {
             final Utils.TriState triState = Utils.TriState.valueOf(prefs.getString(
                     GravityBoxSettings.PREF_KEY_LOCKSCREEN_ROTATION, "DEFAULT"));
             if (triState != Utils.TriState.DEFAULT) {
-                XposedHelpers.findAndHookMethod(sbWindowControllerClass, "shouldEnableKeyguardScreenRotation",
-                        new XC_MethodReplacement() {
+                if (deviceStateClass == null) throw new Throwable("DeviceState not found");
+                XposedHelpers.findAndHookMethod(deviceStateClass, "shouldEnableKeyguardScreenRotation",
+                        Context.class, new XC_MethodReplacement() {
                     @Override
                     protected Object replaceHookedMethod(MethodHookParam param) throws Throwable {
                         if (DEBUG) log("shouldEnableKeyguardScreenRotation called");
@@ -288,11 +308,15 @@ public class ModLockscreen {
                 });
             }
         } catch (Throwable t) {
-            GravityBox.log(TAG, "Error setting up shouldEnableKeyguardScreenRotation hook:", t);
+            GravityBox.log(TAG, "hook shouldEnableKeyguardScreenRotation", t);
         }
 
-        // quick unlock for password view
+        // HOOK 4: quick unlock for password view — KeyguardPasswordView.onFinishInflate() ALIVE;
+        // mPasswordEntry field present (verified by dexdump). NOTE: at unlock time doQuickUnlock()
+        // reads mLockPatternUtils/mCallback off the view — on A15 those moved to the *Controller
+        // (MVC), so quick-unlock dismiss may be a no-op, but it is fully try/caught (no crash).
         try {
+            if (kgPasswordViewClass == null) throw new Throwable("KeyguardPasswordView not found");
             XposedHelpers.findAndHookMethod(kgPasswordViewClass, "onFinishInflate", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(final MethodHookParam param) {
@@ -317,11 +341,14 @@ public class ModLockscreen {
                 }
             });
         } catch (Throwable t) {
-            GravityBox.log(TAG, "Error setting up onFinishInflate hook of PasswordView:", t);
+            GravityBox.log(TAG, "hook KeyguardPasswordView.onFinishInflate", t);
         }
 
-        // PIN scramble and quick unlock for PIN view and Password view
+        // HOOK 5: PIN scramble + quick unlock — KeyguardPINView.onFinishInflate() ALIVE; the
+        // mPasswordEntry field lives on the super KeyguardPinBasedInputView (field lookup walks up,
+        // so getObjectField still resolves it) — verified by dexdump.
         try {
+            if (kgPINViewClass == null) throw new Throwable("KeyguardPINView not found");
             XposedHelpers.findAndHookMethod(kgPINViewClass, "onFinishInflate", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(final MethodHookParam param) {
@@ -342,12 +369,19 @@ public class ModLockscreen {
                 }
             });
         } catch (Throwable t) {
-            GravityBox.log(TAG, "Error setting up onFinishInflate hook of PINView:", t);
+            GravityBox.log(TAG, "hook KeyguardPINView.onFinishInflate", t);
         }
 
+        // HOOK 6: re-scramble PIN on reset. REMAP (A15): KeyguardPINView.resetState() no longer
+        // exists on the View — the MVC migration moved it onto KeyguardPinBasedInputViewController
+        // (Samsung: KeyguardSecPinViewController) as resetState()V. We re-scramble from the
+        // controller's resetState instead (hookAllMethods to cover the AOSP + Sec variants).
         if (!Utils.isXperiaDevice()) {
             try {
-                XposedHelpers.findAndHookMethod(kgPINViewClass, "resetState", new XC_MethodHook() {
+                Class<?> pinCtrlClass = XposedHelpers.findClassIfExists(
+                        "com.android.keyguard.KeyguardPinBasedInputViewController", classLoader);
+                if (pinCtrlClass == null) throw new Throwable("KeyguardPinBasedInputViewController not found");
+                XposedBridge.hookAllMethods(pinCtrlClass, "resetState", new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(final MethodHookParam param) {
                         if (prefs.getBoolean(GravityBoxSettings.PREF_KEY_LOCKSCREEN_PIN_SCRAMBLE, false) &&
@@ -357,12 +391,17 @@ public class ModLockscreen {
                     }
                 });
             } catch (Throwable t) {
-                GravityBox.log(TAG, "Error setting up resetState hook of PINView:", t);
+                GravityBox.log(TAG, "hook KeyguardPinBasedInputViewController.resetState", t);
             }
         }
 
+        // HOOK 7: PIN quick-unlock. SIGFIX (A15): PasswordTextView.append(char) is gone — character
+        // input is now onAppend(char,int)V. The text store mText (String) still exists on the super
+        // BaseSecPasswordTextView, so getObjectField("mText") still resolves (verified by dexdump).
         try {
-            XposedHelpers.findAndHookMethod(kgPasswordTextViewClass, "append", char.class, new XC_MethodHook() {
+            if (kgPasswordTextViewClass == null) throw new Throwable("PasswordTextView not found");
+            XposedHelpers.findAndHookMethod(kgPasswordTextViewClass, "onAppend", char.class, int.class,
+                    new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(final MethodHookParam param) {
                     if (!mPrefs.getBoolean(
@@ -377,26 +416,43 @@ public class ModLockscreen {
                 }
             });
         } catch (Throwable t) {
-            GravityBox.log(TAG, "Error setting up append hook of PasswordTextView:", t);
+            GravityBox.log(TAG, "hook PasswordTextView.onAppend", t);
         }
 
-        // Suppress lockscreen sounds during QuietHours
+        // HOOK 8: suppress lockscreen sounds during QuietHours. SIGFIX (A15): playSounds(boolean)
+        // was replaced by playSound(int soundId) (verified by dexdump). soundId is one of the
+        // mLockSoundId / mUnlockSoundId / mTrustedSoundId fields; we only mute when it matches the
+        // lock sound (and only if those fields resolve), so we no longer kill unlock/trusted sounds.
         try {
-            XposedHelpers.findAndHookMethod(kgViewMediatorClass, "playSounds", boolean.class, new XC_MethodHook() {
+            if (kgViewMediatorClass == null) throw new Throwable("KeyguardViewMediator not found");
+            XposedHelpers.findAndHookMethod(kgViewMediatorClass, "playSound", int.class, new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(final MethodHookParam param) {
-                    if (mQuietHours.isSystemSoundMuted(QuietHours.SystemSound.SCREEN_LOCK)) {
+                    if (!mQuietHours.isSystemSoundMuted(QuietHours.SystemSound.SCREEN_LOCK)) return;
+                    try {
+                        int lockSoundId = XposedHelpers.getIntField(param.thisObject, "mLockSoundId");
+                        if ((int) param.args[0] == lockSoundId) {
+                            param.setResult(null);
+                        }
+                    } catch (Throwable ignore) {
+                        // mLockSoundId not resolvable: fall back to muting all keyguard sounds
                         param.setResult(null);
                     }
                 }
             });
         } catch (Throwable t) {
-            GravityBox.log(TAG, "Error setting up playSounds hook of KeyguardViewMediator:", t);
+            GravityBox.log(TAG, "hook playSound", t);
         }
 
         // Direct unlock and Smart unlock
+        final Class<?> kgViewManagerClass = XposedHelpers.findClassIfExists(CLASS_KG_VIEW_MANAGER, classLoader);
+
+        // HOOK 9: reset/arm unlock state when screen sleeps. REMAP (A15): StatusBarKeyguardViewManager
+        // .onFinishedGoingToSleep() is gone; the sleep callback is now onStartedGoingToSleep()V
+        // (verified by dexdump). Same semantics for our purpose (re-read prefs, clear pending msgs).
         try {
-            XposedHelpers.findAndHookMethod(CLASS_KG_VIEW_MANAGER, classLoader, "onFinishedGoingToSleep",
+            if (kgViewManagerClass == null) throw new Throwable("StatusBarKeyguardViewManager not found");
+            XposedHelpers.findAndHookMethod(kgViewManagerClass, "onStartedGoingToSleep",
                     new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(final MethodHookParam param) {
@@ -416,8 +472,15 @@ public class ModLockscreen {
                     }
                 }
             });
+        } catch (Throwable t) {
+            GravityBox.log(TAG, "hook onStartedGoingToSleep", t);
+        }
 
-            XposedHelpers.findAndHookMethod(CLASS_KG_VIEW_MANAGER, classLoader, "onStartedWakingUp",
+        // HOOK 10: trigger direct/smart unlock on wake — StatusBarKeyguardViewManager
+        // .onStartedWakingUp()V is ALIVE (verified by dexdump).
+        try {
+            if (kgViewManagerClass == null) throw new Throwable("StatusBarKeyguardViewManager not found");
+            XposedHelpers.findAndHookMethod(kgViewManagerClass, "onStartedWakingUp",
                     new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(final MethodHookParam param) {
@@ -448,12 +511,20 @@ public class ModLockscreen {
                 }
             });
         } catch (Throwable t) {
-            GravityBox.log(TAG, "Error setting up Direct/Smart unlock hooks:", t);
+            GravityBox.log(TAG, "hook onStartedWakingUp", t);
         }
 
-        // Lockscreen App Bar
+        // HOOK 15: Lockscreen App Bar attaches to the keyguard_status_area container.
+        // DEFERRED (A15): NotificationPanelViewController moved to the com.android.systemui.shade
+        // package AND no longer holds an mKeyguardStatusView field — the status view is owned by
+        // mKeyguardStatusViewController (MVC migration), so there is no reachable ViewGroup to host
+        // the app bar (verified by dexdump). ModStatusBar.CLASS_NOTIF_PANEL_VIEW_CTRL still points
+        // at the old statusbar.phone path, so this resolves to null and no-ops; guarded regardless.
         try {
-            XposedHelpers.findAndHookMethod(ModStatusBar.CLASS_NOTIF_PANEL_VIEW_CTRL, classLoader,
+            Class<?> npvcClass = XposedHelpers.findClassIfExists(
+                    ModStatusBar.CLASS_NOTIF_PANEL_VIEW_CTRL, classLoader);
+            if (npvcClass == null) throw new Throwable("NotificationPanelViewController not found (app bar)");
+            XposedHelpers.findAndHookMethod(npvcClass,
                     "onFinishInflate", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(final MethodHookParam param) {
@@ -481,12 +552,18 @@ public class ModLockscreen {
                 }
             });
         } catch (Throwable t) {
-            GravityBox.log(TAG, "Error setting up Lockscreen App Bar:", t);
+            GravityBox.log(TAG, "hook app bar onFinishInflate", t);
         }
 
-        // double-tap to sleep
+        // HOOK 16: double-tap-to-sleep on the keyguard. SIGFIX (A15): the hooked method
+        // NotificationPanelViewController$TouchHandler.onTouch(View,MotionEvent)Z is ALIVE (now in
+        // the com.android.systemui.shade package). The host NPVC no longer exposes mStatusBar.mState;
+        // the keyguard state is read directly from the int field mBarState (verified by dexdump).
         try {
-            XposedHelpers.findAndHookMethod(ModStatusBar.CLASS_TOUCH_HANDLER, classLoader,
+            Class<?> touchHandlerClass = XposedHelpers.findClassIfExists(
+                    ModStatusBar.CLASS_TOUCH_HANDLER, classLoader);
+            if (touchHandlerClass == null) throw new Throwable("TouchHandler not found");
+            XposedHelpers.findAndHookMethod(touchHandlerClass,
                     "onTouch", View.class, MotionEvent.class, new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(final MethodHookParam param) {
@@ -494,18 +571,20 @@ public class ModLockscreen {
                             mGestureDetector != null &&
                             ModStatusBar.CLASS_NOTIF_PANEL_VIEW.equals(param.args[0].getClass().getName())) {
                         Object host = XposedHelpers.getSurroundingThis(param.thisObject);
-                        if ((int) XposedHelpers.getIntField(XposedHelpers.getObjectField(host, "mStatusBar"),
-                                "mState") == StatusBarState.KEYGUARD) {
+                        if ((int) XposedHelpers.getIntField(host, "mBarState") == StatusBarState.KEYGUARD) {
                             mGestureDetector.onTouchEvent((MotionEvent) param.args[1]);
                         }
                     }
                 }
             });
         } catch (Throwable t) {
-            GravityBox.log(TAG, "Error setting up DT2S:", t);
+            GravityBox.log(TAG, "hook TouchHandler.onTouch (DT2S)", t);
         }
 
-        // Carrier text
+        // HOOK 17: custom carrier text. REMAP (A15): postToCallback moved from CarrierTextController
+        // to CarrierTextManager; signature is postToCallback(CarrierTextManager$CarrierTextCallbackInfo).
+        // The 'carrierText' field (CharSequence) lives on that inner callback-info class (verified by
+        // dexdump). The hooked arg is still param.args[0] -> set its carrierText.
         if (!Utils.isXperiaDevice()) {
             XC_MethodHook carrierTextHook = new XC_MethodHook() {
                 @Override
@@ -518,62 +597,36 @@ public class ModLockscreen {
                 }
             };
             try {
-                XposedHelpers.findAndHookMethod(CLASS_CARRIER_TEXT_CTRL,
-                        classLoader, "postToCallback", CLASS_CARRIER_TEXT_INFO, carrierTextHook);
+                Class<?> carrierMgrClass = XposedHelpers.findClassIfExists(CLASS_CARRIER_TEXT_MGR, classLoader);
+                Class<?> carrierInfoClass = XposedHelpers.findClassIfExists(CLASS_CARRIER_TEXT_INFO, classLoader);
+                if (carrierMgrClass == null || carrierInfoClass == null)
+                    throw new Throwable("CarrierTextManager/CarrierTextCallbackInfo not found");
+                XposedHelpers.findAndHookMethod(carrierMgrClass,
+                        "postToCallback", carrierInfoClass, carrierTextHook);
             } catch (Throwable t) {
-                GravityBox.log(TAG, "Error setting up carrier text hook:", t);
+                GravityBox.log(TAG, "hook postToCallback (carrier text)", t);
             }
         }
 
-        // bottom actions
+        // HOOKS 11/12/13: lockscreen bottom-action shortcuts (left/right affordance + camera).
+        // DEFERRED (A15): KeyguardBottomAreaView still exists but was rewritten to MVC/Kotlin —
+        // onFinishInflate() survives, but the mRightAffordanceView / mLeftAffordanceView / mDozing
+        // fields and the launchPhone / launchLeftAffordance / launchCamera methods are all GONE
+        // (now getLeftView()/getRightView() delegates + a ViewModel-driven init; verified by
+        // dexdump). The affordances moved to the keyguard-quick-affordance framework. The
+        // onFinishInflate hook installs but its layout listener reads dead fields (null -> no-op,
+        // try/caught); the two method hooks below resolve to nothing. Whole block guarded so the
+        // rest of init is unaffected. The KeyguardBottomAreaView class lookup is null-guarded.
         try {
-            XposedHelpers.findAndHookMethod(CLASS_KG_BOTTOM_AREA_VIEW, classLoader,
-                    "onFinishInflate", new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    ((View)param.thisObject).getViewTreeObserver().addOnGlobalLayoutListener(() -> {
-                        if (mKgBottomAreaLayoutChanging) return;
-                        mKgBottomAreaLayoutChanging = true;
-                        final ImageView camView = (ImageView) XposedHelpers.getObjectField(param.thisObject, "mRightAffordanceView");
-                        if (camView != null) {
-                            if (mRightActionHidden) {
-                                camView.setVisibility(View.GONE);
-                            } else if (mRightAction != null) {
-                                camView.setVisibility(!XposedHelpers.getBooleanField(param.thisObject, "mDozing") ?
-                                        View.VISIBLE : View.GONE);
-                                if (mRightActionDrawableOrig == null) {
-                                    mRightActionDrawableOrig = camView.getDrawable();
-                                }
-                                camView.setImageDrawable(mRightAction.getAppIcon());
-                                camView.setContentDescription(mRightAction.getAppName());
-                            } else if (mRightActionDrawableOrig != null) {
-                                camView.setImageDrawable(mRightActionDrawableOrig);
-                                mRightActionDrawableOrig = null;
-                            }
-                        }
-                        final ImageView phoneView = (ImageView) XposedHelpers.getObjectField(param.thisObject, "mLeftAffordanceView");
-                        if (phoneView != null) {
-                            if (mLeftActionHidden) {
-                                phoneView.setVisibility(View.GONE);
-                            } else if (mLeftAction != null) {
-                                phoneView.setVisibility(!XposedHelpers.getBooleanField(param.thisObject, "mDozing") ?
-                                        View.VISIBLE : View.GONE);
-                                if (mLeftActionDrawableOrig == null) {
-                                    mLeftActionDrawableOrig = phoneView.getDrawable();
-                                }
-                                phoneView.setImageDrawable(mLeftAction.getAppIcon());
-                                phoneView.setContentDescription(mLeftAction.getAppName());
-                            } else if (mLeftActionDrawableOrig != null) {
-                                phoneView.setImageDrawable(mLeftActionDrawableOrig);
-                                mLeftActionDrawableOrig = null;
-                            }
-                        }
-                        mKgBottomAreaLayoutChanging = false;
-                    });
-                }
-            });
+            Class<?> kgBottomAreaClass = XposedHelpers.findClassIfExists(CLASS_KG_BOTTOM_AREA_VIEW, classLoader);
+            if (kgBottomAreaClass == null) throw new Throwable("KeyguardBottomAreaView not found");
+            // DEFERRED (A15): the onFinishInflate layout-listener is INTENTIONALLY not installed.
+            // mRightAffordanceView/mLeftAffordanceView/mDozing are gone -> getObjectField throws
+            // NoSuchFieldError (NOT null) and the listener runs on every layout pass OUTSIDE any
+            // try/catch, which crash-loops SystemUI. The affordances moved to the keyguard
+            // quick-affordance framework; re-porting the icon swap there is future work.
 
-            XposedHelpers.findAndHookMethod(CLASS_KG_BOTTOM_AREA_VIEW, classLoader,
+            XposedHelpers.findAndHookMethod(kgBottomAreaClass,
                     Utils.isSamsungRom() ? "launchPhone" : "launchLeftAffordance",
                     new XC_MethodHook() {
                 @Override
@@ -585,7 +638,7 @@ public class ModLockscreen {
                 }
             });
 
-            XposedBridge.hookAllMethods(XposedHelpers.findClass(CLASS_KG_BOTTOM_AREA_VIEW, classLoader),
+            XposedBridge.hookAllMethods(kgBottomAreaClass,
                      "launchCamera", new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(final MethodHookParam param) throws Throwable {
@@ -596,12 +649,21 @@ public class ModLockscreen {
                 }
             });
         } catch (Throwable t) {
-            GravityBox.log(TAG, "Error setting up bottom actions:", t);
+            GravityBox.log(TAG, "hook bottom actions (KeyguardBottomAreaView)", t);
         }
 
-        // Keyguard scrim alpha (Background opacity)
+        // HOOK 14: keyguard scrim alpha (background opacity).
+        // DEFERRED (A15): ScrimController.scheduleUpdate() is gone (now onPreDraw()/doOnTheNextFrame())
+        // and ScrimState.setScrimBehindAlphaKeyguard(float) is gone — the scrim alpha model was
+        // redesigned (ScrimState now has getMaxLightRevealScrimAlpha()/updateScrimColor(); verified
+        // by dexdump). No drop-in equivalent to push a per-state keyguard alpha. Guarded so init
+        // does not abort; both class lookups are null-guarded.
         try {
-            XposedHelpers.findAndHookMethod(CLASS_SCRIM_CONTROLLER, classLoader,
+            Class<?> scrimCtrlClass = XposedHelpers.findClassIfExists(CLASS_SCRIM_CONTROLLER, classLoader);
+            final Class<?> scrimStateClass = XposedHelpers.findClassIfExists(CLASS_SCRIM_STATE, classLoader);
+            if (scrimCtrlClass == null || scrimStateClass == null)
+                throw new Throwable("ScrimController/ScrimState not found");
+            XposedHelpers.findAndHookMethod(scrimCtrlClass,
             "scheduleUpdate", new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
@@ -609,8 +671,7 @@ public class ModLockscreen {
                             GravityBoxSettings.PREF_KEY_LOCKSCREEN_BACKGROUND_OPACITY, 0);
                     if (opacity == 0) opacity = 55;
                     Object[] states = (Object[]) XposedHelpers.callStaticMethod(
-                            XposedHelpers.findClass(CLASS_SCRIM_STATE, classLoader),
-                            "values");
+                            scrimStateClass, "values");
                     final float alpha = (100 - opacity) / 100f;
                     for (Object state : states) {
                         XposedHelpers.callMethod(state,
@@ -619,22 +680,26 @@ public class ModLockscreen {
                 }
             });
         } catch (Throwable t) {
-            GravityBox.log(TAG, "Error setting up background opacity hook:", t);
+            GravityBox.log(TAG, "hook scheduleUpdate (background opacity)", t);
         }
 
-        // Disable Alarm info
+        // HOOK 18: disable lockscreen next-alarm info. REMAP (A15): KeyguardSliceProvider
+        // .addNextAlarmLocked() is gone; the alarm is set in updateNextAlarm()V. The mNextAlarm field
+        // still exists (now a String) and is read after assignment, so nulling it still suppresses
+        // the alarm row. hookAllMethods covers any overloads (verified by dexdump).
         try {
-            Class<?> classKgSliceProvider = XposedHelpers.findClass(CLASS_KG_SLICE_PROVIDER, classLoader);
-            XposedBridge.hookAllMethods(classKgSliceProvider, "addNextAlarmLocked", new XC_MethodHook() {
+            Class<?> classKgSliceProvider = XposedHelpers.findClassIfExists(CLASS_KG_SLICE_PROVIDER, classLoader);
+            if (classKgSliceProvider == null) throw new Throwable("KeyguardSliceProvider not found");
+            XposedBridge.hookAllMethods(classKgSliceProvider, "updateNextAlarm", new XC_MethodHook() {
                 @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
+                protected void afterHookedMethod(MethodHookParam param) {
                     if (mPrefs.getBoolean(GravityBoxSettings.PREF_KEY_LOCKSCREEN_ALARM_INFO_DISABLE, false)) {
                         XposedHelpers.setObjectField(param.thisObject, "mNextAlarm", null);
                     }
                 }
             });
         } catch (Throwable t) {
-            GravityBox.log(TAG, "Error setting up alarm info disabler:", t);
+            GravityBox.log(TAG, "hook updateNextAlarm (alarm info disabler)", t);
         }
     }
 
@@ -727,7 +792,8 @@ public class ModLockscreen {
         try {
             final Object kgViewManager = XposedHelpers.getObjectField(ModStatusBar.getStatusBar(),
                 "mStatusBarKeyguardViewManager");
-            XposedHelpers.callMethod(kgViewManager, "showBouncer", true);
+            // A15: StatusBarKeyguardViewManager.showBouncer is now no-arg (was showBouncer(boolean)).
+            XposedHelpers.callMethod(kgViewManager, "showBouncer");
         } catch (Throwable t) {
             GravityBox.log(TAG, t);
         }
