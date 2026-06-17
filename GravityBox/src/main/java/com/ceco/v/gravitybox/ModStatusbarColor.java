@@ -15,7 +15,7 @@
 
 package com.ceco.v.gravitybox;
 
-import android.graphics.Rect;
+import java.util.ArrayList;
 
 import com.ceco.v.gravitybox.managers.SysUiManagers;
 import de.robv.android.xposed.XC_MethodHook;
@@ -26,7 +26,10 @@ public class ModStatusbarColor {
     private static final String TAG = "GB:ModStatusbarColor";
     public static final String PACKAGE_NAME = "com.android.systemui";
     private static final String CLASS_SB_TRANSITIONS = "com.android.systemui.statusbar.phone.PhoneStatusBarTransitions";
-    private static final String CLASS_NOTIF_ICON_AREA_CTRL = "com.android.systemui.statusbar.phone.NotificationIconAreaController";
+    // A15/One UI 7: NotificationIconAreaController is now an interface; the concrete onDarkChanged
+    // lives in LegacyNotificationIconAreaControllerImpl, and its first arg is ArrayList (areas),
+    // no longer Rect (confirmed by dexdump).
+    private static final String CLASS_NOTIF_ICON_AREA_CTRL = "com.android.systemui.statusbar.phone.LegacyNotificationIconAreaControllerImpl";
     private static final String CLASS_HEADSUP_APPEARANCE_CTRL = "com.android.systemui.statusbar.phone.HeadsUpAppearanceController";
     private static final boolean DEBUG = false;
 
@@ -42,11 +45,11 @@ public class ModStatusbarColor {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     if (SysUiManagers.IconManager != null) {
-                        final float signalClusterAlpha = (Float) XposedHelpers.callMethod(
-                                param.thisObject, "getNonBatteryClockAlphaFor", (Integer) param.args[0]);
-                        final float textAndBatteryAlpha = (Float) XposedHelpers.callMethod(
-                                param.thisObject, "getBatteryClockAlpha", (Integer) param.args[0]);
-                        SysUiManagers.IconManager.setIconAlpha(signalClusterAlpha, textAndBatteryAlpha);
+                        // A15/One UI 7: the separate getNonBatteryClockAlphaFor/getBatteryClockAlpha
+                        // methods are gone; a single getIconAlphaBasedOnOpacity(int) drives all icons.
+                        final float alpha = (Float) XposedHelpers.callMethod(
+                                param.thisObject, "getIconAlphaBasedOnOpacity", (Integer) param.args[0]);
+                        SysUiManagers.IconManager.setIconAlpha(alpha, alpha);
                     }
                 }
             });
@@ -56,7 +59,7 @@ public class ModStatusbarColor {
 
         try {
             XposedHelpers.findAndHookMethod(CLASS_NOTIF_ICON_AREA_CTRL, classLoader,
-                    "onDarkChanged", Rect.class, float.class, int.class, new XC_MethodHook() {
+                    "onDarkChanged", ArrayList.class, float.class, int.class, new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     if (SysUiManagers.IconManager != null) {
