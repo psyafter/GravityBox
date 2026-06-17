@@ -27,9 +27,14 @@ import de.robv.android.xposed.XSharedPreferences;
 
 public class ModFingerprint {
     private static final String TAG = "GB:ModFingerprint";
-    private static final String CLASS_FINGERPRINT_SERVICE = "com.android.server.biometrics.fingerprint.FingerprintService";
-    private static final String CLASS_FINGERPRINT_UTILS = "com.android.server.biometrics.fingerprint.FingerprintUtils";
-    private static final String CLASS_CLIENT_MONITOR = "com.android.server.biometrics.ClientMonitor";
+    // REMAP (A15 dexdump): biometrics.fingerprint.* -> biometrics.sensors.fingerprint.*.
+    private static final String CLASS_FINGERPRINT_SERVICE = "com.android.server.biometrics.sensors.fingerprint.FingerprintService";
+    private static final String CLASS_FINGERPRINT_UTILS = "com.android.server.biometrics.sensors.fingerprint.FingerprintUtils";
+    // On AcquisitionClient (the old ClientMonitor remap) vibrateError is ABSTRACT (unhookable) and
+    // vibrateSuccess is overridden by Samsung's concrete fingerprint auth client. So hook the live
+    // Samsung client, which declares concrete overrides of BOTH vibrateError/vibrateSuccess()V.
+    private static final String CLASS_CLIENT_MONITOR =
+            "com.android.server.biometrics.sensors.fingerprint.aidl.SemFingerprintAuthenticationClient";
     private static final boolean DEBUG = false;
 
     private static void log(String message) {
@@ -54,15 +59,22 @@ public class ModFingerprint {
                     GravityBoxSettings.PREF_KEY_IMPRINT_VIBE_DISABLE,
                     new HashSet<>());
 
-            XposedBridge.hookAllConstructors(XposedHelpers.findClass(
-                    CLASS_FINGERPRINT_SERVICE, classLoader), new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(final MethodHookParam param) {
-                    FrameworkManagers.BroadcastMediator.subscribe(mBroadcastReceiver,
-                            GravityBoxSettings.ACTION_LOCKSCREEN_SETTINGS_CHANGED);
-                    if (DEBUG) log("Fingerprint service created");
-                }
-            });
+            final Class<?> classFpService = XposedHelpers.findClassIfExists(
+                    CLASS_FINGERPRINT_SERVICE, classLoader);
+            if (classFpService != null) {
+                try {
+                XposedBridge.hookAllConstructors(classFpService, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(final MethodHookParam param) {
+                        FrameworkManagers.BroadcastMediator.subscribe(mBroadcastReceiver,
+                                GravityBoxSettings.ACTION_LOCKSCREEN_SETTINGS_CHANGED);
+                        if (DEBUG) log("Fingerprint service created");
+                    }
+                });
+                } catch (Throwable t) { GravityBox.log(TAG, "hook FingerprintService ctor", t); }
+            } else if (DEBUG) {
+                log("FingerprintService not found");
+            }
 
             XC_MethodHook vibrateErrorHook = new XC_MethodHook() {
                 @Override
@@ -84,10 +96,14 @@ public class ModFingerprint {
                 }
             };
 
-            XposedHelpers.findAndHookMethod(CLASS_CLIENT_MONITOR, classLoader,
-                    "vibrateError", vibrateErrorHook);
-            XposedHelpers.findAndHookMethod(CLASS_CLIENT_MONITOR, classLoader,
-                    "vibrateSuccess", vibrateSuccessHook);
+            try {
+                XposedHelpers.findAndHookMethod(CLASS_CLIENT_MONITOR, classLoader,
+                        "vibrateError", vibrateErrorHook);
+            } catch (Throwable t) { GravityBox.log(TAG, "hook vibrateError", t); }
+            try {
+                XposedHelpers.findAndHookMethod(CLASS_CLIENT_MONITOR, classLoader,
+                        "vibrateSuccess", vibrateSuccessHook);
+            } catch (Throwable t) { GravityBox.log(TAG, "hook vibrateSuccess", t); }
         } catch (Throwable t) {
             GravityBox.log(TAG, t);
         }
