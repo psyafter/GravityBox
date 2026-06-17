@@ -33,7 +33,11 @@ public class ModActivityManager {
         if (DEBUG) log("init");
 
         try {
-            final Class<?> classAms = XposedHelpers.findClass(CLASS_AM_SERVICE, classLoader);
+            final Class<?> classAms = XposedHelpers.findClassIfExists(CLASS_AM_SERVICE, classLoader);
+            if (classAms == null) {
+                if (DEBUG) log("ActivityManagerService not found; skipping");
+                return;
+            }
             XposedBridge.hookAllMethods(classAms, "checkBroadcastFromSystem", new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(final MethodHookParam param) {
@@ -51,12 +55,15 @@ public class ModActivityManager {
         }
 
         try {
+            // A15 (dexdump): appServicesRestrictedInBackgroundLocked is gone; the in-background
+            // restriction check is now appRestrictedInBackgroundLOSP(int uid, int userId, String pkg)I.
+            // Returning 0 (APP_START_MODE_NORMAL / unrestricted) keeps GravityBox services allowed.
             XposedHelpers.findAndHookMethod(CLASS_AM_SERVICE, classLoader,
-                    "appServicesRestrictedInBackgroundLocked",
-                    int.class, String.class, int.class, new XC_MethodHook() {
+                    "appRestrictedInBackgroundLOSP",
+                    int.class, int.class, String.class, new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(final MethodHookParam param) {
-                    if (GravityBox.PACKAGE_NAME.equals(param.args[1])) {
+                    if (GravityBox.PACKAGE_NAME.equals(param.args[2])) {
                         if (DEBUG) log("Explicitly allowing GravityBox background services");
                         param.setResult(0);
                     }
