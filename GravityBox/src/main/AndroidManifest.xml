@@ -49,6 +49,15 @@
         android:protectionLevel="signature" />
     <uses-permission android:name="com.ceco.v.gravitybox.permission.SYSTEM_PROPERTIES" />
 
+    <!-- Restricts the system_server-side connectivity control endpoint (toggle mobile data /
+         wifi / bluetooth / wifi AP / location / NFC / airplane mode) to the same-signed
+         GravityBox app, so other apps cannot drive these from a spoofed broadcast. -->
+    <permission
+        android:name="com.ceco.v.gravitybox.permission.CONNECTIVITY_CONTROL"
+        android:label="Permission to control connectivity via GravityBox"
+        android:protectionLevel="signature" />
+    <uses-permission android:name="com.ceco.v.gravitybox.permission.CONNECTIVITY_CONTROL" />
+
     <application
         android:name="com.ceco.v.gravitybox.GravityBoxApplication"
         android:allowBackup="false"

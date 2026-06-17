@@ -16,14 +16,15 @@
 package com.ceco.v.gravitybox;
 
 import com.ceco.v.gravitybox.managers.BroadcastMediator;
-import com.ceco.v.gravitybox.managers.FrameworkManagers;
 import com.ceco.v.gravitybox.shortcuts.AShortcut;
 
 import android.annotation.SuppressLint;
 import android.bluetooth.BluetoothAdapter;
+import android.content.BroadcastReceiver;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.nfc.NfcAdapter;
 import android.os.Bundle;
 import android.os.ResultReceiver;
@@ -40,7 +41,12 @@ public class ConnectivityServiceWrapper {
 
     private static final String CLASS_CONNECTIVITY_SERVICE = "com.android.server.ConnectivityService";
 
-    public static final String ACTION_SET_MOBILE_DATA_ENABLED = 
+    // Signature-level permission gating this system_server-side connectivity endpoint, so only
+    // the same-signed GravityBox app (or the system uid) can drive it. See AndroidManifest.
+    public static final String PERMISSION_CONNECTIVITY_CONTROL =
+            "com.ceco.v.gravitybox.permission.CONNECTIVITY_CONTROL";
+
+    public static final String ACTION_SET_MOBILE_DATA_ENABLED =
             "gravitybox.intent.action.SET_MOBILE_DATA_ENABLED";
     public static final String ACTION_XPERIA_MOBILE_DATA_TOGGLE =
             "com.android.phone.intent.ACTION_DATA_TRAFFIC_SWITCH";
@@ -98,6 +104,15 @@ public class ConnectivityServiceWrapper {
         }
     };
 
+    // Real BroadcastReceiver wrapping the dispatch logic above; registered directly (with a
+    // signature permission) rather than via the shared BroadcastMediator.
+    private static BroadcastReceiver mProtectedReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            mBroadcastReceiver.onBroadcastReceived(context, intent);
+        }
+    };
+
     public static void initAndroid(final ClassLoader classLoader) {
         try {
             final Class<?> connServiceClass = 
@@ -122,16 +137,29 @@ public class ConnectivityServiceWrapper {
                             mTelephonyManager = (TelephonyManager) context.getSystemService(
                                     Context.TELEPHONY_SERVICE);
 
-                            FrameworkManagers.BroadcastMediator.subscribe(mBroadcastReceiver,
-                                    ACTION_SET_MOBILE_DATA_ENABLED,
-                                    ACTION_TOGGLE_MOBILE_DATA,
-                                    ACTION_TOGGLE_WIFI,
-                                    ACTION_TOGGLE_BLUETOOTH,
-                                    ACTION_TOGGLE_WIFI_AP,
-                                    ACTION_SET_LOCATION_MODE,
-                                    ACTION_TOGGLE_NFC,
-                                    ACTION_GET_NFC_STATE,
-                                    ACTION_TOGGLE_AIRPLANE_MODE);
+                            // These actions toggle connectivity from inside system_server, so
+                            // they must not be spoofable by arbitrary apps. Register a dedicated
+                            // receiver gated by a signature-level permission instead of going
+                            // through the shared (unprotected) FrameworkManagers BroadcastMediator,
+                            // which has to stay permission-free for the system broadcasts it also
+                            // carries. Legit senders (GravityBox app shortcuts; QS tiles in the
+                            // system-uid SystemUI) pass; other apps are rejected.
+                            final IntentFilter filter = new IntentFilter();
+                            filter.addAction(ACTION_SET_MOBILE_DATA_ENABLED);
+                            filter.addAction(ACTION_TOGGLE_MOBILE_DATA);
+                            filter.addAction(ACTION_TOGGLE_WIFI);
+                            filter.addAction(ACTION_TOGGLE_BLUETOOTH);
+                            filter.addAction(ACTION_TOGGLE_WIFI_AP);
+                            filter.addAction(ACTION_SET_LOCATION_MODE);
+                            filter.addAction(ACTION_TOGGLE_NFC);
+                            filter.addAction(ACTION_GET_NFC_STATE);
+                            filter.addAction(ACTION_TOGGLE_AIRPLANE_MODE);
+                            try {
+                                Utils.registerReceiver(mContext, mProtectedReceiver, filter,
+                                        PERMISSION_CONNECTIVITY_CONTROL, true);
+                            } catch (Throwable t) {
+                                GravityBox.log(TAG, "Error registering connectivity receiver: ", t);
+                            }
                         }
                     }
                 }
