@@ -179,7 +179,10 @@ public abstract class TrafficMeterAbstract extends TextView
             IntentFilter filter = new IntentFilter();
             filter.addAction(ConnectivityManager.CONNECTIVITY_ACTION);
             filter.addAction(ModDownloadProvider.ACTION_DOWNLOAD_STATE_CHANGED);
-            getContext().registerReceiver(mIntentReceiver, filter, null, getHandler());
+            // A14+ (targetSdk>=34): a context-registered receiver listening to a non-system
+            // broadcast (ACTION_DOWNLOAD_STATE_CHANGED, sent from another process) must declare
+            // its export state, or registerReceiver throws SecurityException and crashes SystemUI.
+            Utils.registerReceiver(getContext(), mIntentReceiver, filter, true);
  
             if (mPhone != null) {
                 mPhone.listen(mPhoneStateListener, PhoneStateListener.LISTEN_DATA_CONNECTION_STATE);

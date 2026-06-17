@@ -372,6 +372,48 @@ public class ModStatusBar {
         }
     }
 
+    // A15/One UI: makeStatusBarView/setBar (which used to populate mStatusBarView and the
+    // left/right/center areas for injected views) is dead. Re-establish the layout anchors from
+    // the live PhoneStatusBarView, using the real Samsung container ids, so injected views like
+    // the data traffic meter have somewhere to attach.
+    private static void prepareLayoutStatusBarA15(ViewGroup sbv) {
+        try {
+            if (sbv == null || mStatusBarView == sbv) return; // already prepared for this view
+            mStatusBarView = sbv;
+            if (mContext == null) mContext = sbv.getContext();
+            Resources res = mContext.getResources();
+
+            // tear down any meter still bound to a previous (now stale) statusbar view
+            try { setTrafficMeterMode(TrafficMeterMode.OFF); } catch (Throwable ignore) { }
+
+            mLeftArea = sbv.findViewById(res.getIdentifier(
+                    "status_bar_start_side_except_heads_up", "id", PACKAGE_NAME));
+            mRightArea = sbv.findViewById(res.getIdentifier(
+                    "system_icons", "id", PACKAGE_NAME));
+
+            // our own centered container, scoped inside Samsung's center container (not a
+            // full-bar overlay, to avoid intercepting statusbar touches)
+            ViewGroup centerContainer = sbv.findViewById(res.getIdentifier(
+                    "status_bar_center_container", "id", PACKAGE_NAME));
+            mLayoutCenter = new LinearLayout(mContext);
+            mLayoutCenter.setLayoutParams(new LayoutParams(
+                    LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
+            mLayoutCenter.setGravity(Gravity.CENTER);
+            if (DEBUG_LAYOUT) mLayoutCenter.setBackgroundColor(0x4dff0000);
+            if (centerContainer != null) {
+                centerContainer.addView(mLayoutCenter);
+            } else {
+                mStatusBarView.addView(mLayoutCenter);
+            }
+
+            prepareTrafficMeter();
+            if (DEBUG) log("prepareLayoutStatusBarA15: anchors ready (left=" + (mLeftArea != null)
+                    + " right=" + (mRightArea != null) + " center=" + (centerContainer != null) + ")");
+        } catch (Throwable t) {
+            GravityBox.log(TAG, t);
+        }
+    }
+
     private static void prepareLayoutKeyguard() {
         try {
             // inject new center layout container into keyguard status bar
@@ -935,6 +977,20 @@ public class ModStatusBar {
                 });
             } catch (Throwable t) {
                 GravityBox.log(TAG, t);
+            }
+
+            // A15: revive the statusbar layout anchors for injected views (data traffic meter)
+            // from the live PhoneStatusBarView since makeStatusBarView/setBar is dead.
+            try {
+                XposedHelpers.findAndHookMethod(CLASS_PHONE_STATUSBAR_VIEW, classLoader,
+                        "onAttachedToWindow", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        prepareLayoutStatusBarA15((ViewGroup) param.thisObject);
+                    }
+                });
+            } catch (Throwable t) {
+                GravityBox.log(TAG, "Error setting up statusbar layout anchors: " + t);
             }
 
             // Camera vibrate pattern
