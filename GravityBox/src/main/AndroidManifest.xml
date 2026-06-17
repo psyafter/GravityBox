@@ -58,6 +58,16 @@
         android:protectionLevel="signature" />
     <uses-permission android:name="com.ceco.v.gravitybox.permission.CONNECTIVITY_CONTROL" />
 
+    <!-- Gates the GravityBox-private (gravitybox.intent.action.*) broadcasts multiplexed by
+         BroadcastMediator to same-signed senders, so other apps cannot spoof pref-change /
+         command broadcasts. System broadcasts the mediator also carries stay on a separate
+         permission-free receiver (the OS could not deliver them otherwise). -->
+    <permission
+        android:name="com.ceco.v.gravitybox.permission.INTERNAL_BROADCAST"
+        android:label="Permission to send GravityBox internal broadcasts"
+        android:protectionLevel="signature" />
+    <uses-permission android:name="com.ceco.v.gravitybox.permission.INTERNAL_BROADCAST" />
+
     <application
         android:name="com.ceco.v.gravitybox.GravityBoxApplication"
         android:allowBackup="false"

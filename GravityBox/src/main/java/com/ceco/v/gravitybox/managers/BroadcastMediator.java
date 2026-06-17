@@ -33,6 +33,20 @@ public class BroadcastMediator {
     public static final String TAG="GB:BroadcastMediator";
     private static boolean DEBUG = false;
 
+    // Signature-level permission gating GravityBox-private broadcasts. Senders are the GravityBox
+    // app (holds it via uses-permission) or system-uid hook processes (SystemUI/system_server,
+    // exempt). See AndroidManifest.
+    public static final String PERMISSION_INTERNAL_BROADCAST =
+            "com.ceco.v.gravitybox.permission.INTERNAL_BROADCAST";
+
+    // A GravityBox-private action: must be gated by the permission. System/external broadcasts
+    // (android.*, com.android.*, ...) never match this, so they can never be misrouted onto the
+    // permission-protected receiver (which would stop the OS from delivering them).
+    private static boolean isGbAction(String action) {
+        return action != null && (action.startsWith("gravitybox.intent.action.")
+                || action.startsWith("gravity.intent.action."));
+    }
+
     private static void log(String msg) {
         XposedBridge.log(TAG + ": " + msg);
     }
@@ -52,20 +66,29 @@ public class BroadcastMediator {
 
     private Context mContext;
     private final List<Subscriber> mSubscribers;
-    private final IntentFilter mIntentFilter;
-    private boolean mInternalReceiverRegistered;
+    // System/external broadcasts -> permission-free receiver (the OS would otherwise be unable
+    // to deliver protected broadcasts to a permission-gated receiver).
+    private final IntentFilter mSystemFilter;
+    // GravityBox-private broadcasts -> signature-permission-gated receiver.
+    private final IntentFilter mGbFilter;
+    private boolean mSystemReceiverRegistered;
+    private boolean mGbReceiverRegistered;
 
     BroadcastMediator() {
         mSubscribers = new ArrayList<>();
-        mIntentFilter = new IntentFilter();
+        mSystemFilter = new IntentFilter();
+        mGbFilter = new IntentFilter();
         if (DEBUG) log("BroadcastMediator created");
     }
 
     void setContext(Context context) {
         if (DEBUG) log("Received context");
         mContext = context;
-        if (mIntentFilter.countActions() > 0) {
-            registerReceiverInternal();
+        if (mSystemFilter.countActions() > 0) {
+            registerSystemReceiver();
+        }
+        if (mGbFilter.countActions() > 0) {
+            registerGbReceiver();
         }
     }
 
@@ -76,41 +99,68 @@ public class BroadcastMediator {
      */
     public void subscribe(Receiver receiver, List<String> actions) {
         synchronized (mSubscribers) {
-            final int oldActionCount = mIntentFilter.countActions();
+            final int oldSystemCount = mSystemFilter.countActions();
+            final int oldGbCount = mGbFilter.countActions();
             for (String action : actions) {
-                if (!mIntentFilter.hasAction(action)) {
-                    mIntentFilter.addAction(action);
+                final IntentFilter filter = isGbAction(action) ? mGbFilter : mSystemFilter;
+                if (!filter.hasAction(action)) {
+                    filter.addAction(action);
                 }
             }
             mSubscribers.add(new Subscriber(receiver, actions));
             if (DEBUG) log("subscribing receiver: " + receiver);
-            if (oldActionCount != mIntentFilter.countActions()) {
-                registerReceiverInternal();
+            if (oldSystemCount != mSystemFilter.countActions()) {
+                registerSystemReceiver();
+            }
+            if (oldGbCount != mGbFilter.countActions()) {
+                registerGbReceiver();
             }
         }
     }
 
-    private void registerReceiverInternal() {
+    private void registerSystemReceiver() {
         if (mContext == null) return;
-        if (mInternalReceiverRegistered) {
+        if (mSystemReceiverRegistered) {
             try {
-                mContext.unregisterReceiver(mReceiverInternal);
+                mContext.unregisterReceiver(mReceiverSystem);
             } catch (Throwable t) {
-                GravityBox.log(TAG, "registerReceiverInternal: error unregistering old receiver: ", t);
+                GravityBox.log(TAG, "registerSystemReceiver: error unregistering old receiver: ", t);
             }
-            mInternalReceiverRegistered = false;
-            if (DEBUG) log("reisterReceiverInternal: old internal receiver unregistered");
+            mSystemReceiverRegistered = false;
         }
-        // Android 14+ (targetSdk >= 34) requires explicit export state for context-registered
-        // receivers of non-system broadcasts. The GET_SYSTEM_PROPERTIES/REGISTER_UUID broadcasts
-        // are sent by the separate GravityBox settings app, so the receiver must be EXPORTED.
+        // System/external broadcasts: kept permission-free and EXPORTED (unchanged behaviour) so
+        // the OS can deliver protected broadcasts (SCREEN_ON/OFF, TIME_TICK, CONFIGURATION_CHANGED,
+        // RINGER_MODE_CHANGED, ...) it carries.
         try {
-            Utils.registerReceiver(mContext, mReceiverInternal, mIntentFilter, true);
-            mInternalReceiverRegistered = true;
-            if (DEBUG) log("reisterReceiverInternal: new internal receiver registered (exported); actions="
-                    + mIntentFilter.countActions());
+            Utils.registerReceiver(mContext, mReceiverSystem, mSystemFilter, true);
+            mSystemReceiverRegistered = true;
+            if (DEBUG) log("registerSystemReceiver: registered (exported); actions="
+                    + mSystemFilter.countActions());
         } catch (Throwable t) {
-            GravityBox.log(TAG, "registerReceiverInternal: error registering receiver: ", t);
+            GravityBox.log(TAG, "registerSystemReceiver: error registering receiver: ", t);
+        }
+    }
+
+    private void registerGbReceiver() {
+        if (mContext == null) return;
+        if (mGbReceiverRegistered) {
+            try {
+                mContext.unregisterReceiver(mReceiverGb);
+            } catch (Throwable t) {
+                GravityBox.log(TAG, "registerGbReceiver: error unregistering old receiver: ", t);
+            }
+            mGbReceiverRegistered = false;
+        }
+        // GravityBox-private broadcasts: gated by a signature-level permission so only same-signed
+        // senders (the GravityBox app) or system-uid hook processes can drive them.
+        try {
+            Utils.registerReceiver(mContext, mReceiverGb, mGbFilter,
+                    PERMISSION_INTERNAL_BROADCAST, true);
+            mGbReceiverRegistered = true;
+            if (DEBUG) log("registerGbReceiver: registered (permission-gated); actions="
+                    + mGbFilter.countActions());
+        } catch (Throwable t) {
+            GravityBox.log(TAG, "registerGbReceiver: error registering receiver: ", t);
         }
     }
 
@@ -139,20 +189,31 @@ public class BroadcastMediator {
         }
     }
 
-    private BroadcastReceiver mReceiverInternal = new BroadcastReceiver() {
+    private void dispatch(Context context, Intent intent) {
+        synchronized (mSubscribers) {
+            List<Receiver> toNotify = mSubscribers.stream()
+                    .filter(s -> s.actions.contains(intent.getAction()))
+                    .map(s -> s.receiver)
+                    .collect(Collectors.toList());
+            toNotify.forEach(r -> {
+                if (DEBUG) log("Notifying listener: " + r +
+                        "; action=" + intent.getAction());
+                r.onBroadcastReceived(context, intent);
+            });
+        }
+    }
+
+    private final BroadcastReceiver mReceiverSystem = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
-            synchronized (mSubscribers) {
-                List<Receiver> toNotify = mSubscribers.stream()
-                        .filter(s -> s.actions.contains(intent.getAction()))
-                        .map(s -> s.receiver)
-                        .collect(Collectors.toList());
-                toNotify.forEach(r -> {
-                    if (DEBUG) log("Notifying listener: " + r +
-                            "; action=" + intent.getAction());
-                    r.onBroadcastReceived(context, intent);
-                });
-            }
+            dispatch(context, intent);
+        }
+    };
+
+    private final BroadcastReceiver mReceiverGb = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            dispatch(context, intent);
         }
     };
 
