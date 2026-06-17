@@ -54,9 +54,18 @@ public class ModPieControls {
     private static final boolean DEBUG = false;
     private static final boolean DEBUG_INPUT = false;
 
-    private static final String CLASS_SYSTEM_UI = "com.android.systemui.SystemUI";
-    private static final String CLASS_STATUSBAR = "com.android.systemui.statusbar.phone.StatusBar";
-    private static final String CLASS_NAVBAR_FRAGMENT = "com.android.systemui.statusbar.phone.NavigationBarFragment";
+    // A15/One UI 7 anchor remaps (dexdump):
+    //  - monolithic StatusBar -> CentralSurfacesImpl (has start()/mContext); base SystemUI class
+    //    gone (-> CoreStartable), so onConfigurationChanged re-attach has no clean anchor -> deferred.
+    //  - NavigationBarFragment -> navigationbar.NavigationBar (setImeWindowStatus intact).
+    //  - disable() moved off StatusBar -> CommandQueue.disable(int,int,int,boolean).
+    //  - topAppWindowChanged removed entirely -> menu-visibility-on-top-app deferred.
+    private static final String CLASS_STATUSBAR = "com.android.systemui.statusbar.phone.CentralSurfacesImpl";
+    private static final String CLASS_NAVBAR_FRAGMENT = "com.android.systemui.navigationbar.NavigationBar";
+    private static final String CLASS_COMMAND_QUEUE = "com.android.systemui.statusbar.CommandQueue";
+
+    // previous disable state (replaces the removed CentralSurfaces.mDisabled1 field)
+    private static int mPrevDisabled1 = 0;
 
     public static final int STATUS_BAR_DISABLE_HOME = 0x00200000;
     public static final int STATUS_BAR_DISABLE_SEARCH = 0x02000000;
@@ -294,8 +303,11 @@ public class ModPieControls {
 
     public static void init(final XSharedPreferences prefs, final ClassLoader classLoader) {
         try {
-            final Class<?> statusBarClass = XposedHelpers.findClass(CLASS_STATUSBAR, classLoader);
-            final Class<?> systemUiClass = XposedHelpers.findClass(CLASS_SYSTEM_UI, classLoader);
+            final Class<?> statusBarClass = XposedHelpers.findClassIfExists(CLASS_STATUSBAR, classLoader);
+            if (statusBarClass == null) {
+                if (DEBUG) log("CentralSurfacesImpl not found; skipping");
+                return;
+            }
 
             mPieMode = PIE_DISABLED;
             try {
@@ -321,10 +333,11 @@ public class ModPieControls {
                 GravityBox.log(TAG, "Invalid value for PREF_KEY_EXPANDED_DESKTOP preference");
             }
 
+            try {
             XposedHelpers.findAndHookMethod(statusBarClass, "start", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                    if (DEBUG) log("StatusBar starting...");
+                    if (DEBUG) log("CentralSurfacesImpl starting...");
                     mContext = (Context) XposedHelpers.getObjectField(param.thisObject, "mContext");
                     mGbContext = Utils.getGbContext(mContext);
                     mWindowManager = (WindowManager) mContext.getSystemService(Context.WINDOW_SERVICE);
@@ -354,25 +367,25 @@ public class ModPieControls {
                     mSettingsObserver.observe();
                 }
             });
+            } catch (Throwable t) { GravityBox.log(TAG, "hook CentralSurfacesImpl.start", t); }
 
-            XposedHelpers.findAndHookMethod(systemUiClass, 
-                    "onConfigurationChanged", Configuration.class, new XC_MethodHook() {
+            // DEFERRED (A15): base SystemUI class is gone (-> CoreStartable) and CentralSurfacesImpl
+            // has no onConfigurationChanged/onConfigChanged anchor -> no clean re-attach-on-config-change
+            // hook. Pie still re-attaches via the settings observer / broadcast receiver.
 
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    attachPie();
-                }
-            });
-
-            XposedHelpers.findAndHookMethod(statusBarClass, "disable", 
+            // disable() moved off StatusBar to CommandQueue.disable(int displayId, int state1,
+            // int state2, boolean animate). Track previous state ourselves (mDisabled1 is gone).
+            try {
+            XposedHelpers.findAndHookMethod(CLASS_COMMAND_QUEUE, classLoader, "disable",
                     int.class, int.class, int.class, boolean.class, new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
                     if (mPieController == null) return;
+                    if ((int) param.args[0] != 0) return; // DEFAULT_DISPLAY only
 
-                    final int old = XposedHelpers.getIntField(param.thisObject, "mDisabled1");
                     final int state = (Integer) param.args[1];
-                    final int diff = state ^ old;
+                    final int diff = state ^ mPrevDisabled1;
+                    mPrevDisabled1 = state;
                     if ((diff & (STATUS_BAR_DISABLE_HOME
                             | STATUS_BAR_DISABLE_RECENT
                             | STATUS_BAR_DISABLE_BACK
@@ -381,7 +394,9 @@ public class ModPieControls {
                     }
                 }
             });
+            } catch (Throwable t) { GravityBox.log(TAG, "hook CommandQueue.disable", t); }
 
+            try {
             XposedHelpers.findAndHookMethod(CLASS_NAVBAR_FRAGMENT, classLoader, "setImeWindowStatus",
                     int.class, IBinder.class, int.class, int.class, boolean.class, new XC_MethodHook() {
                 @Override
@@ -396,19 +411,11 @@ public class ModPieControls {
                     }
                 }
             });
+            } catch (Throwable t) { GravityBox.log(TAG, "hook NavigationBar.setImeWindowStatus", t); }
 
-            XposedHelpers.findAndHookMethod(CLASS_STATUSBAR, classLoader,
-                    "topAppWindowChanged", int.class, boolean.class, boolean.class,
-                    new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    if (mPieController == null) return;
-
-                    mPieController.setMenuVisibility((Boolean)param.args[1]
-                            | mShowMenuItem
-                            | mAlwaysShowMenuItem);
-                }
-            });
+            // DEFERRED (A15): StatusBar.topAppWindowChanged removed entirely -> no per-top-app menu
+            // visibility signal. Pie menu visibility still honours the mShowMenuItem/mAlwaysShowMenuItem
+            // prefs applied at attach time.
         } catch (Throwable t) {
             GravityBox.log(TAG, t);
         }
