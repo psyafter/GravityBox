@@ -55,11 +55,16 @@ public class ModTelephony {
 
     public static void initZygote(final XSharedPreferences prefs) {
         try {
-            final Class<?> classServiceStateTracker = 
-                    XposedHelpers.findClass(CLASS_SERVICE_STATE_TRACKER, null);
+            final Class<?> classServiceStateTracker =
+                    XposedHelpers.findClassIfExists(CLASS_SERVICE_STATE_TRACKER, null);
+            if (classServiceStateTracker == null) {
+                if (DEBUG) log("ServiceStateTracker not found; skipping");
+                return;
+            }
 
             mNationalRoamingEnabled = prefs.getBoolean(GravityBoxSettings.PREF_KEY_NATIONAL_ROAMING, false);
 
+            try {
             XposedBridge.hookAllConstructors(classServiceStateTracker, new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
@@ -73,9 +78,11 @@ public class ModTelephony {
                     }
                 }
             });
+            } catch (Throwable t) { GravityBox.log(TAG, "hook SST ctor", t); }
 
             if (Utils.hasGeminiSupport()) {
-                XposedHelpers.findAndHookMethod(CLASS_SERVICE_STATE_EXT, null, "ignoreDomesticRoaming", 
+                try {
+                XposedHelpers.findAndHookMethod(CLASS_SERVICE_STATE_EXT, null, "ignoreDomesticRoaming",
                         new XC_MethodReplacement() {
                     @Override
                     protected Object replaceHookedMethod(MethodHookParam param) {
@@ -83,7 +90,9 @@ public class ModTelephony {
                         return mNationalRoamingEnabled;
                     }
                 });
+                } catch (Throwable t) { GravityBox.log(TAG, "hook ignoreDomesticRoaming", t); }
             } else {
+                try {
                 XposedHelpers.findAndHookMethod(classServiceStateTracker, "isOperatorConsideredNonRoaming",
                         CLASS_SERVICE_STATE, new XC_MethodHook() {
                     @Override
@@ -96,7 +105,9 @@ public class ModTelephony {
                         param.setResult(result);
                     }
                 });
+                } catch (Throwable t) { GravityBox.log(TAG, "hook isOperatorConsideredNonRoaming", t); }
 
+                try {
                 XposedHelpers.findAndHookMethod(classServiceStateTracker, "isOperatorConsideredRoaming",
                         CLASS_SERVICE_STATE, new XC_MethodHook() {
                     @Override
@@ -109,7 +120,9 @@ public class ModTelephony {
                         param.setResult(result);
                     }
                 });
+                } catch (Throwable t) { GravityBox.log(TAG, "hook isOperatorConsideredRoaming", t); }
 
+                try {
                 XposedHelpers.findAndHookMethod(CLASS_PHONE_BASE, null,
                         "isMccMncMarkedAsRoaming", String.class, new XC_MethodHook() {
                     @Override
@@ -122,6 +135,7 @@ public class ModTelephony {
                         param.setResult(result);
                     }
                 });
+                } catch (Throwable t) { GravityBox.log(TAG, "hook isMccMncMarkedAsRoaming", t); }
             }
         } catch (Throwable t) {
             GravityBox.log(TAG, t);
