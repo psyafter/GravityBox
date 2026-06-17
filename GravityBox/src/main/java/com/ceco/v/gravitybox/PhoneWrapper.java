@@ -30,6 +30,10 @@ public class PhoneWrapper {
     private static final String TAG = "GB:PhoneWrapper";
     private static final boolean DEBUG = false;
 
+    // A12+ allowed-network-types API: setPreferredNetworkType(int) is gone, replaced by
+    // setAllowedNetworkTypes(int reason, long raf, Message). REASON_USER == 0 (stable since API 31).
+    private static final int ALLOWED_NETWORK_TYPES_REASON_USER = 0;
+
     public static final int NT_WCDMA_PREFERRED = 0;             // GSM/WCDMA (WCDMA preferred) (2g/3g)
     public static final int NT_GSM_ONLY = 1;                    // GSM Only (2g)
     public static final int NT_WCDMA_ONLY = 2;                  // WCDMA ONLY (3g)
@@ -70,6 +74,7 @@ public class PhoneWrapper {
     private static Class<?> mPhoneBaseClass;
     private static Class<?> mPhoneProxyClass;
     private static Class<?> mSystemProperties;
+    private static Class<?> mRadioAccessFamily;
     private static Context mContext;
     private static int mSimSlot = 0;
     private static int mPhoneCount = -1;
@@ -160,14 +165,31 @@ public class PhoneWrapper {
         }
     }
 
+    // Legacy preferred-network-mode (NT_*) -> RAF bitmask used by setAllowedNetworkTypes, and back.
+    private static long rafFromNetworkMode(int networkMode) {
+        return ((Number) XposedHelpers.callStaticMethod(
+                mRadioAccessFamily, "getRafFromNetworkType", networkMode)).longValue();
+    }
+
+    private static int networkModeFromRaf(long raf) {
+        return (int) XposedHelpers.callStaticMethod(
+                mRadioAccessFamily, "getNetworkTypeFromRaf", (int) raf);
+    }
+
     public static void initZygote(final XSharedPreferences prefs) {
         if (DEBUG) log("Entering init state");
 
         try {
-            mClsPhoneFactory = getPhoneFactoryClass();
-            mPhoneBaseClass = getPhoneBaseClass();
+            mClsPhoneFactory = XposedHelpers.findClassIfExists("com.android.internal.telephony.PhoneFactory", null);
+            mPhoneBaseClass = XposedHelpers.findClassIfExists("com.android.internal.telephony.Phone", null);
             mPhoneProxyClass = getPhoneProxyClass();
-            mSystemProperties = XposedHelpers.findClass("android.os.SystemProperties", null);
+            mSystemProperties = XposedHelpers.findClassIfExists("android.os.SystemProperties", null);
+            mRadioAccessFamily = XposedHelpers.findClassIfExists(
+                    "com.android.internal.telephony.RadioAccessFamily", null);
+            if (mClsPhoneFactory == null || mPhoneBaseClass == null) {
+                if (DEBUG) log("PhoneFactory/Phone not found; skipping");
+                return;
+            }
 
             mSimSlot = 0;
             try {
@@ -178,31 +200,43 @@ public class PhoneWrapper {
             }
             if (DEBUG) log("mSimSlot = " + mSimSlot);
 
-            XposedHelpers.findAndHookMethod(mClsPhoneFactory, getMakePhoneMethodName(), 
-                    Context.class, new XC_MethodHook() {
+            // A15: makeDefaultPhone is now (Context, FeatureFlags) and makeDefaultPhones may be
+            // absent. hookAllMethods on both names is robust to the arg/overload changes; Context
+            // is still args[0].
+            XC_MethodHook makePhoneHook = new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(final MethodHookParam param) {
                     mContext = (Context) param.args[0];
-                    if (DEBUG) log("PhoneFactory makeDefaultPhones - phone wrapper initialized");
+                    if (DEBUG) log("PhoneFactory makeDefaultPhone - phone wrapper initialized");
                     onInitialize();
                 }
-            });
+            };
+            try { XposedBridge.hookAllMethods(mClsPhoneFactory, "makeDefaultPhone", makePhoneHook); }
+            catch (Throwable t) { GravityBox.log(TAG, "hook makeDefaultPhone", t); }
+            try { XposedBridge.hookAllMethods(mClsPhoneFactory, "makeDefaultPhones", makePhoneHook); }
+            catch (Throwable t) { GravityBox.log(TAG, "hook makeDefaultPhones", t); }
 
-            XC_MethodHook spntHook = new XC_MethodHook() {
+            // A12+: setPreferredNetworkType(int,Message) is gone -> setAllowedNetworkTypes(int reason,
+            // long raf, Message). After-hook broadcasts the legacy NT_ mode (converted from RAF) so
+            // the SmartRadio/QS tile feed still works; filter to REASON_USER to avoid system noise.
+            XC_MethodHook santHook = new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(final MethodHookParam param) {
-                    int phoneId = XposedHelpers.getIntField(param.thisObject, "mPhoneId");
-                    if (DEBUG) log("setPreferredNetworkType: networkType=" + param.args[0] +
-                            "; phoneId=" + phoneId);
-                    broadcastCurrentNetworkType(phoneId, (int)param.args[0], null);
+                    try {
+                        int reason = (int) param.args[0];
+                        if (reason != ALLOWED_NETWORK_TYPES_REASON_USER) return;
+                        int phoneId = XposedHelpers.getIntField(param.thisObject, "mPhoneId");
+                        int networkType = networkModeFromRaf(((Number) param.args[1]).longValue());
+                        if (DEBUG) log("setAllowedNetworkTypes: networkType=" + networkType +
+                                "; phoneId=" + phoneId);
+                        broadcastCurrentNetworkType(phoneId, networkType, null);
+                    } catch (Throwable t) { GravityBox.log(TAG, t); }
                 }
             };
-            XposedHelpers.findAndHookMethod(mPhoneBaseClass, "setPreferredNetworkType",
-                    int.class, Message.class, spntHook);
-            if (mPhoneProxyClass != null) {
-                XposedHelpers.findAndHookMethod(mPhoneProxyClass, "setPreferredNetworkType",
-                        int.class, Message.class, spntHook);
-            }
+            try {
+                XposedHelpers.findAndHookMethod(mPhoneBaseClass, "setAllowedNetworkTypes",
+                        int.class, long.class, Message.class, santHook);
+            } catch (Throwable t) { GravityBox.log(TAG, "hook setAllowedNetworkTypes", t); }
         } catch (Throwable t) {
             GravityBox.log(TAG, t);
         }
@@ -235,10 +269,12 @@ public class PhoneWrapper {
                 int subId = (int) XposedHelpers.callMethod(defPhone, "getSubId");
                 Settings.Global.putInt(mContext.getContentResolver(),
                         PREFERRED_NETWORK_MODE + subId, networkType);
-                Class<?>[] paramArgs = new Class<?>[2];
-                paramArgs[0] = int.class;
-                paramArgs[1] = Message.class;
-                XposedHelpers.callMethod(defPhone, "setPreferredNetworkType", paramArgs, networkType, null);
+                // A12+: drive the radio via setAllowedNetworkTypes(reason, raf, msg) instead of the
+                // removed setPreferredNetworkType(int, msg). RAF = bitmask for the legacy NT_ mode.
+                long raf = rafFromNetworkMode(networkType);
+                Class<?>[] paramArgs = new Class<?>[] { int.class, long.class, Message.class };
+                XposedHelpers.callMethod(defPhone, "setAllowedNetworkTypes",
+                        paramArgs, ALLOWED_NETWORK_TYPES_REASON_USER, raf, null);
             }
             broadcastCurrentNetworkType(mSimSlot, networkType, null);
         } catch (Throwable t) {
@@ -265,8 +301,9 @@ public class PhoneWrapper {
             if (phoneId < phones.length) {
                 int subId = (int) XposedHelpers.callMethod(phones[phoneId], "getSubId");
                 if (DEBUG) log("getCurrentNetworkType: calculating network type for subId=" + subId);
+                // A15: calculatePreferredNetworkType dropped the Context arg -> (int subId)I.
                 networkType = (int) XposedHelpers.callStaticMethod(mClsPhoneFactory,
-                        "calculatePreferredNetworkType", mContext, subId);
+                        "calculatePreferredNetworkType", subId);
             }
             if (DEBUG) log("getCurrentNetworkType: phoneId=" + phoneId +
                     "; networkType=" + getNetworkModeNameFromValue(networkType));

@@ -428,7 +428,8 @@ public class ModSmartRadio {
 
         private void scheduleAlarm() {
             Intent intent = new Intent(ACTION_CHANGE_MODE_ALARM);
-            mPendingIntent = PendingIntent.getBroadcast(mContext, 1, intent, PendingIntent.FLAG_ONE_SHOT);
+            mPendingIntent = PendingIntent.getBroadcast(mContext, 1, intent,
+                    PendingIntent.FLAG_ONE_SHOT | PendingIntent.FLAG_IMMUTABLE);
             long triggerAtMillis = System.currentTimeMillis() + mScreenOffDelay*60*1000;
             mAlarmManager.setExact(AlarmManager.RTC_WAKEUP, triggerAtMillis, mPendingIntent);
             mLinkActivity.timestamp = System.currentTimeMillis();
@@ -482,8 +483,12 @@ public class ModSmartRadio {
 
     public static void init(final XSharedPreferences prefs, final ClassLoader classLoader) {
         try {
-            final Class<?> classSystemUIService = XposedHelpers.findClass(
+            final Class<?> classSystemUIService = XposedHelpers.findClassIfExists(
                     "com.android.systemui.SystemUIService", classLoader);
+            if (classSystemUIService == null) {
+                if (DEBUG) log("SystemUIService not found; skipping");
+                return;
+            }
 
             mNormalMode = prefs.getInt(GravityBoxSettings.PREF_KEY_SMART_RADIO_NORMAL_MODE, -1);
             mPowerSavingMode = prefs.getInt(GravityBoxSettings.PREF_KEY_SMART_RADIO_POWER_SAVING_MODE, -1);
