@@ -33,8 +33,12 @@ import de.robv.android.xposed.XposedHelpers;
 public class ModLowBatteryWarning {
     private static final String TAG = "GB:ModLowBatteryWarning";
     public static final String PACKAGE_NAME = "com.android.systemui";
+    // A15/One UI 7 (dexdump): findBatteryLevelBucket(I)I still lives on the base PowerUI (inherited
+    // by Samsung's SecPowerUI), so the debug hook can stay on PowerUI.
     private static final String CLASS_POWER_UI = "com.android.systemui.power.PowerUI";
-    private static final String CLASS_POWER_WARNINGS = "com.android.systemui.power.PowerNotificationWarnings";
+    // REMAP: PowerNotificationWarnings is DEAD on One UI 7 -> Samsung's SecPowerNotificationWarnings
+    // (verified: updateNotification()V + fields mPlaySound/mWarning).
+    private static final String CLASS_POWER_WARNINGS = "com.android.systemui.power.SecPowerNotificationWarnings";
     private static final String CLASS_BATTERY_SERVICE_LED = "com.android.server.BatteryService$Led";
     public static final boolean DEBUG = false;
 
@@ -76,11 +80,16 @@ public class ModLowBatteryWarning {
     public static void initAndroid(final XSharedPreferences prefs, final XSharedPreferences qhPrefs, final ClassLoader classLoader) {
         if (DEBUG) log("initAndroid");
         try {
-            final Class<?> batteryServiceClass = XposedHelpers.findClass(CLASS_BATTERY_SERVICE_LED, classLoader);
+            final Class<?> batteryServiceClass = XposedHelpers.findClassIfExists(CLASS_BATTERY_SERVICE_LED, classLoader);
+            if (batteryServiceClass == null) {
+                if (DEBUG) log("BatteryService$Led not found; skipping LED half");
+                return;
+            }
 
             mFlashingLedDisabled = prefs.getBoolean(GravityBoxSettings.PREF_KEY_FLASHING_LED_DISABLE, false);
             mChargingLed = ChargingLed.valueOf(prefs.getString(GravityBoxSettings.PREF_KEY_CHARGING_LED, "DEFAULT"));
 
+            try {
             XposedBridge.hookAllConstructors(batteryServiceClass, new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
@@ -89,7 +98,9 @@ public class ModLowBatteryWarning {
                             GravityBoxSettings.ACTION_BATTERY_LED_CHANGED);
                 }
             });
+            } catch (Throwable t) { GravityBox.log(TAG, "hook BatteryService$Led ctor", t); }
 
+            try {
             XposedHelpers.findAndHookMethod(batteryServiceClass, "updateLightsLocked", new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
@@ -118,6 +129,7 @@ public class ModLowBatteryWarning {
                     }
                 }
             });
+            } catch (Throwable t) { GravityBox.log(TAG, "hook updateLightsLocked", t); }
         } catch (Throwable t) {
             GravityBox.log(TAG, t);
         }
@@ -131,16 +143,24 @@ public class ModLowBatteryWarning {
 
             // for debugging purposes - simulate low battery even if it's not
             if (DEBUG) {
-                Class<?> classPowerUI = findClass(CLASS_POWER_UI, classLoader);
-                findAndHookMethod(classPowerUI, "findBatteryLevelBucket", int.class, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        param.setResult(-1);
+                try {
+                    Class<?> classPowerUI = XposedHelpers.findClassIfExists(CLASS_POWER_UI, classLoader);
+                    if (classPowerUI != null) {
+                        findAndHookMethod(classPowerUI, "findBatteryLevelBucket", int.class, new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) {
+                                param.setResult(-1);
+                            }
+                        });
                     }
-                });
+                } catch (Throwable t) { GravityBox.log(TAG, "hook findBatteryLevelBucket", t); }
             }
 
-            Class<?> classPowerWarnings = findClass(CLASS_POWER_WARNINGS, classLoader);
+            Class<?> classPowerWarnings = XposedHelpers.findClassIfExists(CLASS_POWER_WARNINGS, classLoader);
+            if (classPowerWarnings == null) {
+                if (DEBUG) log("SecPowerNotificationWarnings not found; skipping warning half");
+                return;
+            }
             findAndHookMethod(classPowerWarnings, "updateNotification", new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
