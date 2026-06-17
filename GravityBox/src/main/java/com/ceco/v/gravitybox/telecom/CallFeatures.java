@@ -106,29 +106,39 @@ public class CallFeatures {
     }
 
     private void createHooks(ClassLoader classLoader) {
-        Class<?> clsCallsManager = XposedHelpers.findClass(CLASS_CALLS_MANAGER, classLoader);
+        Class<?> clsCallsManager = XposedHelpers.findClassIfExists(CLASS_CALLS_MANAGER, classLoader);
+        if (clsCallsManager == null) {
+            if (DEBUG) log("CallsManager not found; skipping");
+            return;
+        }
 
-        XposedBridge.hookAllConstructors(clsCallsManager, new XC_MethodHook() {
-            @Override
-            protected void afterHookedMethod(MethodHookParam param) {
-                onCallsManagerCreated(param.thisObject);
-            }
-        });
+        try {
+            XposedBridge.hookAllConstructors(clsCallsManager, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    onCallsManagerCreated(param.thisObject);
+                }
+            });
+        } catch (Throwable t) { GravityBox.log(TAG, "hook CallsManager ctor", t); }
 
-        XposedHelpers.findAndHookMethod(clsCallsManager, "addCall", CLASS_CALL, new XC_MethodHook() {
-            @Override
-            protected void afterHookedMethod(MethodHookParam param) {
-                onCallAdded(param.args[0]);
-            }
-        });
+        try {
+            XposedHelpers.findAndHookMethod(clsCallsManager, "addCall", CLASS_CALL, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    onCallAdded(param.args[0]);
+                }
+            });
+        } catch (Throwable t) { GravityBox.log(TAG, "hook addCall", t); }
 
-        XposedHelpers.findAndHookMethod(clsCallsManager, "setCallState",
-                CLASS_CALL, int.class, String.class, new XC_MethodHook() {
-            @Override
-            protected void afterHookedMethod(MethodHookParam param) {
-                onCallStateChanged(param.args[0], (int)param.args[1]);
-            }
-        });
+        try {
+            XposedHelpers.findAndHookMethod(clsCallsManager, "setCallState",
+                    CLASS_CALL, int.class, String.class, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    onCallStateChanged(param.args[0], (int)param.args[1]);
+                }
+            });
+        } catch (Throwable t) { GravityBox.log(TAG, "hook setCallState", t); }
     }
 
     private void onCallsManagerCreated(Object callsManager) {
@@ -285,7 +295,13 @@ public class CallFeatures {
         if (call == null) return;
 
         try {
-            XposedHelpers.callMethod(call, "reject", false, null);
+            // A15/One UI 7: Call.reject is reject(boolean, String, String); older builds use the
+            // 2-arg reject(boolean, String). Try the current signature, fall back for safety.
+            try {
+                XposedHelpers.callMethod(call, "reject", false, null, null);
+            } catch (NoSuchMethodError nsme) {
+                XposedHelpers.callMethod(call, "reject", false, null);
+            }
             if (DEBUG) log("Call rejected");
         } catch (Throwable t) {
             GravityBox.log(TAG, t);
