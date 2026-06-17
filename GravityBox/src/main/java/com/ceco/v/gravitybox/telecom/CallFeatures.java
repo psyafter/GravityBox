@@ -21,6 +21,7 @@ import java.util.Set;
 
 import com.ceco.v.gravitybox.GravityBox;
 import com.ceco.v.gravitybox.GravityBoxSettings;
+import com.ceco.v.gravitybox.Utils;
 
 import android.annotation.SuppressLint;
 import android.content.BroadcastReceiver;
@@ -140,7 +141,7 @@ public class CallFeatures {
         mWakeLock  = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, TAG);
 
         IntentFilter intentFilter = new IntentFilter(GravityBoxSettings.ACTION_PREF_CALL_FEATURES_CHANGED);
-        mContext.registerReceiver(mBroadcastReceiver, intentFilter);
+        Utils.registerReceiver(mContext, mBroadcastReceiver, intentFilter, true);
     }
 
     private void onCallAdded(Object call) {

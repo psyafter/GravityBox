@@ -21,6 +21,7 @@ import android.content.IntentFilter;
 import android.os.PatternMatcher;
 
 import com.ceco.v.gravitybox.GravityBox;
+import com.ceco.v.gravitybox.Utils;
 
 import de.robv.android.xposed.XposedBridge;
 
@@ -53,7 +54,7 @@ public class SysUiPackageManager {
                 }
             }
         };
-        context.registerReceiver(broadcasReceiver, intentFilter);
+        Utils.registerReceiver(context, broadcasReceiver, intentFilter, false);
 
         if (DEBUG) log("PACKAGE_ADDED receiver registered");
     }

@@ -69,8 +69,8 @@ public class ModInputMethod {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     mService = (InputMethodService) param.thisObject;
-                    mService.registerReceiver(mReceiver, new IntentFilter(
-                            GravityBoxSettings.ACTION_PREF_IME_CHANGED));
+                    Utils.registerReceiver(mService, mReceiver, new IntentFilter(
+                            GravityBoxSettings.ACTION_PREF_IME_CHANGED), true);
                     if (DEBUG) log("IME service created");
                 }
             });

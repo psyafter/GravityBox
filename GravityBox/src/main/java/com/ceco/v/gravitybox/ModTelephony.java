@@ -68,7 +68,7 @@ public class ModTelephony {
                         Context context = (Context) XposedHelpers.callMethod(phone, "getContext");
                         IntentFilter intentFilter = new IntentFilter();
                         intentFilter.addAction(GravityBoxSettings.ACTION_PREF_TELEPHONY_CHANGED);
-                        context.registerReceiver(mBroadcastReceiver, intentFilter);
+                        Utils.registerReceiver(context, mBroadcastReceiver, intentFilter, true);
                         if (DEBUG) log("ServiceStateTracker constructed; broadcast receiver registered");
                     }
                 }

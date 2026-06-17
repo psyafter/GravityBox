@@ -16,6 +16,7 @@ package com.ceco.v.gravitybox.telecom;
 
 import com.ceco.v.gravitybox.GravityBox;
 import com.ceco.v.gravitybox.ModTelecom;
+import com.ceco.v.gravitybox.Utils;
 
 import android.app.Notification;
 import android.app.NotificationManager;
@@ -116,7 +117,7 @@ public class MissedCallNotifier {
                 if (!n.extras.containsKey(EXTRA_FROM_GB) && pkgName.equals(ModTelecom.PACKAGE_NAME) && 
                         (Integer)param.args[1] == MISSED_CALL_NOTIF_ID) {
                     if (mNotifOnNextScreenOff == null) {
-                        context.registerReceiver(mScreenOffReceiver, new IntentFilter(Intent.ACTION_SCREEN_OFF));
+                        Utils.registerReceiver(context, mScreenOffReceiver, new IntentFilter(Intent.ACTION_SCREEN_OFF), false);
                         if (DEBUG) log("Scheduled missed call notification for next screen off");
                     }
                     mNotifOnNextScreenOff = n;

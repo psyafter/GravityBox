@@ -99,8 +99,8 @@ public class ModDialer {
                 protected void afterHookedMethod(MethodHookParam param) {
                     if (DEBUG) log("MainActivity: onResume");
                     Context ctx = (android.app.Activity) param.thisObject;
-                    ctx.registerReceiver(mBroadcastReceiver,
-                            new IntentFilter(QuietHoursActivity.ACTION_QUIET_HOURS_CHANGED));
+                    Utils.registerReceiver(ctx, mBroadcastReceiver,
+                            new IntentFilter(QuietHoursActivity.ACTION_QUIET_HOURS_CHANGED), true);
                     Intent i = new Intent(QuietHoursActivity.ACTION_QUIET_HOURS_CHANGED);
                     i.setComponent(new ComponentName(GravityBox.PACKAGE_NAME,
                             GravityBoxService.class.getName()));

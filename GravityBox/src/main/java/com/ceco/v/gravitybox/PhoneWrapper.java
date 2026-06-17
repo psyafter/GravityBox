@@ -213,7 +213,7 @@ public class PhoneWrapper {
             IntentFilter intentFilter = new IntentFilter(ACTION_CHANGE_NETWORK_TYPE);
             intentFilter.addAction(GravityBoxSettings.ACTION_PREF_QS_NETWORK_MODE_SIM_SLOT_CHANGED);
             intentFilter.addAction(ACTION_GET_CURRENT_NETWORK_TYPE);
-            mContext.registerReceiver(mBroadcastReceiver, intentFilter);
+            Utils.registerReceiver(mContext, mBroadcastReceiver, intentFilter, true);
         }
     }
 
