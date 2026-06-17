@@ -33,6 +33,7 @@ import android.os.IBinder;
 import android.os.Message;
 import android.os.PowerManager;
 import android.os.PowerManager.WakeLock;
+import android.os.SystemClock;
 import android.telephony.TelephonyManager;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XC_MethodReplacement;
@@ -46,6 +47,7 @@ public class ModPower {
     private static final String CLASS_PM_HANDLER = "com.android.server.power.PowerManagerService$PowerManagerHandlerCallback";
     private static final String CLASS_PM_NOTIFIER = "com.android.server.power.Notifier";
     private static final String CLASS_SHUTDOWN_THREAD = "com.android.server.power.ShutdownThread";
+    private static final String CLASS_POWER_GROUP = "com.android.server.power.PowerGroup";
     private static final boolean DEBUG = false;
 
     private static final int MSG_WAKE_UP = 100;
@@ -105,41 +107,52 @@ public class ModPower {
                                    final ClassLoader classLoader) {
         mQh = new QuietHours(qhPrefs);
 
-        Class<?> pmServiceClass = null;
-        try {
-            pmServiceClass = XposedHelpers.findClass(CLASS_PM_SERVICE, classLoader);
-        } catch (Throwable t) {
-            GravityBox.log(TAG, t);
+        final Class<?> pmServiceClass = XposedHelpers.findClassIfExists(CLASS_PM_SERVICE, classLoader);
+        if (pmServiceClass == null) {
+            if (DEBUG) log("PowerManagerService not found");
         }
 
-        // wake up with proximity feature
+        // Proximity-wake feature, RE-ANCHORED for A15/One UI 7 (dexdump):
+        //  - init: systemReady is gone from PMS -> capture mContext/mHandler/mLock from the PMS
+        //    constructor (all three are assigned in <init>(Context, Injector)).
+        //  - wake intercept: wakeUpInternal is gone -> the per-PowerGroup wake path
+        //    wakePowerGroupLocked(PowerGroup, long eventTime, int reason, String, int, String, int,
+        //    boolean). It is a *Locked method (caller holds mLock), so the delayed re-invoke must
+        //    re-acquire mLock and refresh the stale eventTime, else the wake gets dropped.
+        //  The hook is a no-op when the proximity feature is off (default), so it is safe to install.
         try {
-            Class<?> pmHandlerClass = XposedHelpers.findClass(CLASS_PM_HANDLER, classLoader);
-
             mIgnoreIncomingCall = prefs.getBoolean(
                     GravityBoxSettings.PREF_KEY_POWER_PROXIMITY_WAKE_IGNORE_CALL, false);
             mLockscreenTorch = Integer.valueOf(
                     prefs.getString(GravityBoxSettings.PREF_KEY_HWKEY_LOCKSCREEN_TORCH, "0"));
 
-            XposedBridge.hookAllMethods(pmServiceClass, "systemReady", new XC_MethodHook() {
+            try {
+            XposedBridge.hookAllConstructors(pmServiceClass, new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     mContext = (Context) XposedHelpers.getObjectField(param.thisObject, "mContext");
                     mHandler = (Handler) XposedHelpers.getObjectField(param.thisObject, "mHandler");
                     mLock = XposedHelpers.getObjectField(param.thisObject, "mLock");
-                    toggleWakeUpWithProximityFeature(prefs.getBoolean(
-                            GravityBoxSettings.PREF_KEY_POWER_PROXIMITY_WAKE, false));
+                    // NOT force-enabled here: a bad wake re-anchor could stop the screen waking and
+                    // block testing of every other module. Left gated off (hook is then a no-op);
+                    // proximity-wake is toggled on via ACTION_PREF_POWER_CHANGED broadcast in Phase C.
+                    toggleWakeUpWithProximityFeature(
+                            prefs.getBoolean(GravityBoxSettings.PREF_KEY_POWER_PROXIMITY_WAKE, false));
 
                     FrameworkManagers.BroadcastMediator.subscribe(mBroadcastReceiver,
                             GravityBoxSettings.ACTION_PREF_POWER_CHANGED,
                             GravityBoxSettings.ACTION_PREF_BATTERY_SOUND_CHANGED,
                             GravityBoxSettings.ACTION_PREF_HWKEY_LOCKSCREEN_TORCH_CHANGED,
                             QuietHoursActivity.ACTION_QUIET_HOURS_CHANGED);
+                    if (DEBUG) log("PMS constructed; proximity-wake init done");
                 }
             });
+            } catch (Throwable t) { GravityBox.log(TAG, "hook PMS <init>", t); }
 
-            XposedHelpers.findAndHookMethod(pmServiceClass, "wakeUpInternal",
-                    long.class, int.class, String.class, int.class, String.class, int.class, new XC_MethodHook() {
+            try {
+            XposedHelpers.findAndHookMethod(pmServiceClass, "wakePowerGroupLocked",
+                    CLASS_POWER_GROUP, long.class, int.class, String.class, int.class, String.class,
+                    int.class, boolean.class, new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(final MethodHookParam param) {
                     if (Utils.isMotoXtDevice()) {
@@ -151,7 +164,7 @@ public class ModPower {
                     //noinspection SynchronizeOnNonFinalField
                     synchronized (mLock) {
                         if (mHandler.hasMessages(MSG_WAKE_UP)) {
-                            if (DEBUG) log("wakeUpInternal: Wake up message already queued");
+                            if (DEBUG) log("wakePowerGroupLocked: Wake up message already queued");
                             param.setResult(null);
                             return;
                         }
@@ -159,8 +172,14 @@ public class ModPower {
                         mWakeUpRunnable = () -> {
                             final long ident = Binder.clearCallingIdentity();
                             try {
-                                if (DEBUG) log("Waking up...");
-                                XposedBridge.invokeOriginalMethod(param.method, param.thisObject, param.args);
+                                if (DEBUG) log("Waking up (proximity cleared)...");
+                                // refresh stale eventTime (arg index 1) so the *Locked wake is not
+                                // dropped as older than the last sleep; re-acquire mLock.
+                                param.args[1] = SystemClock.uptimeMillis();
+                                synchronized (mLock) {
+                                    XposedBridge.invokeOriginalMethod(
+                                            param.method, param.thisObject, param.args);
+                                }
                             } catch (Throwable ignored) {
                             } finally {
                                 Binder.restoreCallingIdentity(ident);
@@ -171,25 +190,32 @@ public class ModPower {
                     }
                 }
             });
+            } catch (Throwable t) { GravityBox.log(TAG, "hook wakePowerGroupLocked", t); }
 
-            XposedHelpers.findAndHookMethod(pmHandlerClass, "handleMessage",
-                    Message.class, new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(final MethodHookParam param) {
-                    Message msg = (Message) param.args[0];
-                    if (msg.what == MSG_WAKE_UP) {
-                        mWakeUpRunnable.run();
-                        unregisterProxSensorListener();
-                    } else if (msg.what == MSG_UNREGISTER_PROX_SENSOR_LISTENER) {
-                        unregisterProxSensorListener();
+            try {
+            Class<?> pmHandlerClass = XposedHelpers.findClassIfExists(CLASS_PM_HANDLER, classLoader);
+            if (pmHandlerClass != null) {
+                XposedHelpers.findAndHookMethod(pmHandlerClass, "handleMessage",
+                        Message.class, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(final MethodHookParam param) {
+                        Message msg = (Message) param.args[0];
+                        if (msg.what == MSG_WAKE_UP) {
+                            mWakeUpRunnable.run();
+                            unregisterProxSensorListener();
+                        } else if (msg.what == MSG_UNREGISTER_PROX_SENSOR_LISTENER) {
+                            unregisterProxSensorListener();
+                        }
                     }
-                }
-            });
+                });
+            }
+            } catch (Throwable t) { GravityBox.log(TAG, "hook handleMessage", t); }
         } catch (Throwable t) {
             GravityBox.log(TAG, t);
         }
 
-        // Charging started
+        // Charging started feedback suppression (custom charging sound / Quiet Hours).
+        // VERIFIED ALIVE on A15 (dexdump): Notifier.playChargingStartedFeedback(int,boolean)V.
         try {
             updateIsChargingSoundCustom(prefs.getString(
                     GravityBoxSettings.PREF_KEY_CHARGER_PLUGGED_SOUND, null));
@@ -207,9 +233,12 @@ public class ModPower {
             GravityBox.log(TAG, t);
         }
 
-        // Wake on plug for TouchWiz
+        // Wake on plug/unplug. DEFERRED on A15 (dexdump): shouldWakeUpWhenPluggedOrUnpluggedLocked
+        // was removed by the display-group refactor. Gated off by default; guarded so a forced gate
+        // would hit a caught NoSuchMethod rather than crash. Re-anchoring is Tier-3 work.
         try {
-            if (!prefs.getBoolean(GravityBoxSettings.PREF_KEY_UNPLUG_TURNS_ON_SCREEN, true)) {
+            if (pmServiceClass != null &&
+                    !prefs.getBoolean(GravityBoxSettings.PREF_KEY_UNPLUG_TURNS_ON_SCREEN, true)) {
                 XposedHelpers.findAndHookMethod(pmServiceClass, "shouldWakeUpWhenPluggedOrUnpluggedLocked",
                     boolean.class, int.class, boolean.class, XC_MethodReplacement.returnConstant(false));
             }
