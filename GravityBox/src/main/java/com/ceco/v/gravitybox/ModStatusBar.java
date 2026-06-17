@@ -16,7 +16,6 @@ package com.ceco.v.gravitybox;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 
 import com.ceco.v.gravitybox.TrafficMeterAbstract.TrafficMeterMode;
 import com.ceco.v.gravitybox.managers.BroadcastMediator;
@@ -48,7 +47,6 @@ import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.provider.Settings;
 import android.service.notification.StatusBarNotification;
-import android.service.notification.NotificationListenerService.RankingMap;
 import android.util.TypedValue;
 import android.view.GestureDetector;
 import android.view.Gravity;
@@ -74,7 +72,10 @@ public class ModStatusBar {
     public static final String CLASS_NOTIF_PANEL_VIEW_CTRL = "com.android.systemui.statusbar.phone.NotificationPanelViewController";
     private static final String CLASS_COLLAPSED_SB_FRAGMENT = "com.android.systemui.statusbar.phone.CollapsedStatusBarFragment";
     private static final String CLASS_NOTIF_ICON_CONTAINER = "com.android.systemui.statusbar.phone.NotificationIconContainer";
-    private static final String CLASS_NOTIF_ENTRY_MANAGER = "com.android.systemui.statusbar.notification.NotificationEntryManager";
+    // A15/One UI 7: notification pipeline replacing the dead NotificationEntryManager.
+    // postNotification(StatusBarNotification, NotificationListenerService$Ranking) is the
+    // add/update entry point (verified by dexdump, see android15-port.md §20).
+    private static final String CLASS_NOTIF_COLLECTION = "com.android.systemui.statusbar.notification.collection.NotifCollection";
     private static final String CLASS_QS_FRAGMENT = "com.android.systemui.qs.QSFragment";
     // A15/One UI: Samsung statusbar clock base class (QSClockIndicatorView extends QSClock
     // extends TextView). The old AOSP statusbar.policy.Clock is gone.
@@ -406,11 +407,11 @@ public class ModStatusBar {
                 mStatusBarView.addView(mLayoutCenter);
             }
 
-            // The progress controller is the shared listener registry for the battery bar and
-            // traffic meter (and the download progress bar). It used to be created in the dead
+            // The progress controller is the shared listener registry for the battery bar,
+            // traffic meter and the download progress bar. It used to be created in the dead
             // makeStatusBarView hook; create it lazily here. Its ctor is hook-free, so it is safe
-            // on A15; progress *data* still needs the notification hooks (dead), so for now it only
-            // serves as the registry and the battery bar shows battery (not download progress).
+            // on A15; the live notification feed now comes from SysUiNotificationDataMonitor
+            // (NotifCollection), so download progress data is no longer dead (see §20).
             if (mProgressBarCtrl == null) {
                 mProgressBarCtrl = new ProgressBarController(mContext, mPrefs);
             }
@@ -418,6 +419,7 @@ public class ModStatusBar {
                 prepareBatteryStyle(ContainerType.STATUSBAR);
             }
             prepareBatteryBar(ContainerType.STATUSBAR);
+            prepareProgressBar(ContainerType.STATUSBAR);
             prepareTrafficMeter();
             if (DEBUG) log("prepareLayoutStatusBarA15: anchors ready (left=" + (mLeftArea != null)
                     + " right=" + (mRightArea != null) + " center=" + (centerContainer != null) + ")");
@@ -794,79 +796,62 @@ public class ModStatusBar {
             // brightness control: on A15 the old StatusBar.interceptTouchEvent is gone;
             // the gesture is now driven from the PhoneStatusBarView.onTouchEvent hook below.
 
-            // Ongoing notification blocker and progress bar
+            // Ongoing notification blocker.
+            // A15/One UI 7: the legacy NotificationEntryManager.addNotification is gone; the
+            // add/update entry point is now NotifCollection.postNotification(StatusBarNotification,
+            // Ranking) — verified by dexdump (see §20). Blocking via param.setResult(null) skips
+            // postNotification so the blocked notification never enters the collection.
+            // The download-progress *feed* used to live here too; it has moved to
+            // ProgressBarController, which now listens to SysUiNotificationDataMonitor directly.
             try {
-                XposedHelpers.findAndHookMethod(CLASS_NOTIF_ENTRY_MANAGER, classLoader, "addNotification",
-                        StatusBarNotification.class, RankingMap.class, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        final StatusBarNotification notif = (StatusBarNotification) param.args[0];
-                        final String pkg = notif.getPackageName();
-                        final boolean clearable = notif.isClearable();
-                        final int id = notif.getId();
-                        final Notification n = notif.getNotification();
-                        if (DEBUG) log ("addNotificationViews: pkg=" + pkg + "; id=" + id + 
-                                        "; iconId=" + n.icon + "; clearable=" + clearable);
-    
-                        if (clearable) return;
-    
-                        // store if new
-                        final String notifData = pkg + "," + n.icon;
-                        final ContentResolver cr = mContext.getContentResolver();
-                        String storedNotifs = Settings.Secure.getString(cr,
-                                SETTING_ONGOING_NOTIFICATIONS);
-                        if (storedNotifs == null || !storedNotifs.contains(notifData)) {
-                            if (storedNotifs == null || storedNotifs.isEmpty()) {
-                                storedNotifs = notifData;
-                            } else {
-                                storedNotifs += "#C3C0#" + notifData;
+                Class<?> notifCollectionClass = XposedHelpers.findClassIfExists(
+                        CLASS_NOTIF_COLLECTION, classLoader);
+                if (notifCollectionClass != null) {
+                    XposedBridge.hookAllMethods(notifCollectionClass, "postNotification", new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            StatusBarNotification notif = null;
+                            for (Object o : param.args) {
+                                if (o instanceof StatusBarNotification) {
+                                    notif = (StatusBarNotification) o;
+                                    break;
+                                }
                             }
-                            if (DEBUG) log("New storedNotifs = " + storedNotifs);
-                            Settings.Secure.putString(cr, SETTING_ONGOING_NOTIFICATIONS, storedNotifs);
-                        }
-    
-                        // block if requested
-                        if (mOngoingNotif.contains(notifData)) {
-                            param.setResult(null);
-                            param.getExtra().putBoolean("returnEarly", true);
-                            if (DEBUG) log("Ongoing notification " + notifData + " blocked.");
-                        }
-                    }
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        if (!param.getExtra().getBoolean("returnEarly") && mProgressBarCtrl != null) {
-                            mProgressBarCtrl.onNotificationAdded((StatusBarNotification)param.args[0]);
-                        }
-                    }
-                });
-    
-                XposedHelpers.findAndHookMethod(CLASS_NOTIF_ENTRY_MANAGER, classLoader, "updateNotification",
-                        StatusBarNotification.class, RankingMap.class, new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        if (mProgressBarCtrl != null) {
-                            mProgressBarCtrl.onNotificationUpdated((StatusBarNotification)param.args[0]);
-                        }
-                    }
-                });
-    
-                XposedHelpers.findAndHookMethod(CLASS_NOTIF_ENTRY_MANAGER, classLoader, "removeNotification",
-                        String.class, RankingMap.class, int.class, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        if (mProgressBarCtrl != null) {
-                            Map<String, ?> notifMap = (Map<String, ?>) XposedHelpers.getObjectField(
-                                    param.thisObject, "mActiveNotifications");
-                            Object entry = notifMap.get(param.args[0].toString());
-                            if (entry != null) {
-                                mProgressBarCtrl.onNotificationRemoved((StatusBarNotification)
-                                        XposedHelpers.getObjectField(entry, "mSbn"));
+                            if (notif == null) return;
+
+                            final String pkg = notif.getPackageName();
+                            final boolean clearable = notif.isClearable();
+                            final Notification n = notif.getNotification();
+                            if (DEBUG) log("postNotification: pkg=" + pkg + "; id=" + notif.getId() +
+                                            "; iconId=" + n.icon + "; clearable=" + clearable);
+
+                            if (clearable) return;
+
+                            // store if new
+                            final String notifData = pkg + "," + n.icon;
+                            final ContentResolver cr = mContext.getContentResolver();
+                            String storedNotifs = Settings.Secure.getString(cr,
+                                    SETTING_ONGOING_NOTIFICATIONS);
+                            if (storedNotifs == null || !storedNotifs.contains(notifData)) {
+                                if (storedNotifs == null || storedNotifs.isEmpty()) {
+                                    storedNotifs = notifData;
+                                } else {
+                                    storedNotifs += "#C3C0#" + notifData;
+                                }
+                                if (DEBUG) log("New storedNotifs = " + storedNotifs);
+                                Settings.Secure.putString(cr, SETTING_ONGOING_NOTIFICATIONS, storedNotifs);
+                            }
+
+                            // block if requested
+                            if (mOngoingNotif != null && mOngoingNotif.contains(notifData)) {
+                                param.setResult(null);
+                                if (DEBUG) log("Ongoing notification " + notifData + " blocked.");
                             }
                         }
-                    }
-                });
+                    });
+                }
             } catch (Throwable t) {
-                GravityBox.log(TAG, "Error setting up ongoing notification control and progress bar", t);
+                GravityBox.log(TAG, "Error setting up ongoing notification control", t);
             }
 
             // Expanded notifications

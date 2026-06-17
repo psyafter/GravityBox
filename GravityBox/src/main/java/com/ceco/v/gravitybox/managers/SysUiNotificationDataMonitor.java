@@ -40,7 +40,12 @@ public class SysUiNotificationDataMonitor {
     }
 
     public interface Listener {
-        void onNotificationDataChanged(final StatusBarNotification sbn);
+        // Legacy catch-all, fired for every change (add/update/remove). Kept for LockscreenAppBar.
+        default void onNotificationDataChanged(final StatusBarNotification sbn) {}
+        // Notification posted or updated (A15: NotifCollection.postNotification fires for both).
+        default void onNotificationPosted(final StatusBarNotification sbn) {}
+        // Notification removed (A15: NotifCollection.tryRemoveNotification).
+        default void onNotificationRemoved(final StatusBarNotification sbn) {}
     }
 
     private Context mContext;
@@ -57,47 +62,69 @@ public class SysUiNotificationDataMonitor {
     }
 
     private void createHooks() {
-        try {
-            ClassLoader cl = mContext.getClassLoader();
-            Class<?> classNotifCollection = XposedHelpers.findClass(CLASS_NOTIF_COLLECTION, cl);
-            Class<?> classNotifEntryManager = XposedHelpers.findClass(CLASS_NOTIF_ENTRY_MANAGER, cl);
+        ClassLoader cl = mContext.getClassLoader();
 
-            XposedBridge.hookAllConstructors(classNotifCollection, new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(final MethodHookParam param) {
-                    mNotifCollection = param.thisObject;
-                    if (DEBUG) log("NotifCollection object constructed");
-                }
-            });
+        // A15/One UI 7 (verified by dexdump): the live notification source is NotifCollection:
+        //   postNotification(StatusBarNotification, NotificationListenerService$Ranking)  -> add/update
+        //   tryRemoveNotification(NotificationEntry)                                      -> remove
+        // The legacy NotificationEntryManager is GONE on A15, so each hook is installed
+        // individually (findClassIfExists + per-hook try/catch, pattern §13) — a dead class
+        // must not abort the live NotifCollection hooks (LockscreenAppBar depends on them).
+        Class<?> classNotifCollection = XposedHelpers.findClassIfExists(CLASS_NOTIF_COLLECTION, cl);
+        if (classNotifCollection != null) {
+            try {
+                XposedBridge.hookAllConstructors(classNotifCollection, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(final MethodHookParam param) {
+                        mNotifCollection = param.thisObject;
+                        if (DEBUG) log("NotifCollection object constructed");
+                    }
+                });
+            } catch (Throwable t) { GravityBox.log(TAG, "hook NotifCollection ctor", t); }
 
-            XposedBridge.hookAllMethods(classNotifCollection, "postNotification", new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(final MethodHookParam param) {
-                    if (DEBUG) log("Notification entry added");
-                    StatusBarNotification sbn = getSbNotificationFromArgs(param.args);
-                    notifyDataChanged(sbn);
-                }
-            });
+            try {
+                XposedBridge.hookAllMethods(classNotifCollection, "postNotification", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(final MethodHookParam param) {
+                        if (DEBUG) log("Notification entry posted/updated");
+                        StatusBarNotification sbn = getSbNotificationFromArgs(param.args);
+                        notifyPosted(sbn);
+                        notifyDataChanged(sbn);
+                    }
+                });
+            } catch (Throwable t) { GravityBox.log(TAG, "hook postNotification", t); }
 
-            XposedBridge.hookAllMethods(classNotifCollection, "tryRemoveNotification", new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(final MethodHookParam param) {
-                    if (DEBUG) log("Notification entry removed");
-                    StatusBarNotification sbn = getSbNotificationFromArgs(param.args);
-                    notifyDataChanged(sbn);
-                }
-            });
+            try {
+                XposedBridge.hookAllMethods(classNotifCollection, "tryRemoveNotification", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(final MethodHookParam param) {
+                        if (DEBUG) log("Notification entry removed");
+                        StatusBarNotification sbn = getSbNotificationFromArgs(param.args);
+                        notifyRemoved(sbn);
+                        notifyDataChanged(sbn);
+                    }
+                });
+            } catch (Throwable t) { GravityBox.log(TAG, "hook tryRemoveNotification", t); }
+        } else {
+            GravityBox.log(TAG, "NotifCollection not found - notification monitoring disabled");
+        }
 
-            XposedHelpers.findAndHookMethod(classNotifEntryManager, "updateNotification",
-                    StatusBarNotification.class, RankingMap.class, new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    if (DEBUG) log("Notification entry updated");
-                    notifyDataChanged((StatusBarNotification) param.args[0]);
-                }
-            });
-        } catch (Throwable t) {
-            GravityBox.log(TAG, t);
+        // Legacy update path - absent on A15, kept guarded for forward/back compatibility.
+        // (On A15 updates arrive as repeated postNotification with the same key.)
+        Class<?> classNotifEntryManager = XposedHelpers.findClassIfExists(CLASS_NOTIF_ENTRY_MANAGER, cl);
+        if (classNotifEntryManager != null) {
+            try {
+                XposedHelpers.findAndHookMethod(classNotifEntryManager, "updateNotification",
+                        StatusBarNotification.class, RankingMap.class, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        if (DEBUG) log("Notification entry updated");
+                        StatusBarNotification sbn = (StatusBarNotification) param.args[0];
+                        notifyPosted(sbn);
+                        notifyDataChanged(sbn);
+                    }
+                });
+            } catch (Throwable t) { GravityBox.log(TAG, "hook updateNotification", t); }
         }
     }
 
@@ -125,6 +152,22 @@ public class SysUiNotificationDataMonitor {
         synchronized (mListeners) {
             for (Listener l : mListeners) {
                 l.onNotificationDataChanged(sbn);
+            }
+        }
+    }
+
+    private void notifyPosted(StatusBarNotification sbn) {
+        synchronized (mListeners) {
+            for (Listener l : mListeners) {
+                l.onNotificationPosted(sbn);
+            }
+        }
+    }
+
+    private void notifyRemoved(StatusBarNotification sbn) {
+        synchronized (mListeners) {
+            for (Listener l : mListeners) {
+                l.onNotificationRemoved(sbn);
             }
         }
     }

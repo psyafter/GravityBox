@@ -39,12 +39,14 @@ import android.widget.RemoteViews;
 
 import com.ceco.v.gravitybox.managers.BroadcastMediator;
 import com.ceco.v.gravitybox.managers.SysUiManagers;
+import com.ceco.v.gravitybox.managers.SysUiNotificationDataMonitor;
 
 import de.robv.android.xposed.XSharedPreferences;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 
-public class ProgressBarController implements BroadcastMediator.Receiver {
+public class ProgressBarController implements BroadcastMediator.Receiver,
+        SysUiNotificationDataMonitor.Listener {
     private static final String TAG = "GB:ProgressBarController";
     private static final boolean DEBUG = false;
 
@@ -141,6 +143,20 @@ public class ProgressBarController implements BroadcastMediator.Receiver {
 
         SysUiManagers.BroadcastMediator.subscribe(this,
                 GravityBoxSettings.ACTION_PREF_STATUSBAR_DOWNLOAD_PROGRESS_CHANGED);
+
+        // Live A15 notification feed (NotifCollection via SysUiNotificationDataMonitor).
+        // Replaces the dead NotificationEntryManager hooks that fed onNotification* on A11.
+        if (SysUiManagers.NotifDataMonitor != null) {
+            SysUiManagers.NotifDataMonitor.registerListener(this);
+        }
+    }
+
+    // SysUiNotificationDataMonitor.Listener: a post fires for both new and updated
+    // notifications (e.g. download progress increments re-post the same key);
+    // onNotificationUpdated() already adds-if-new, so it covers both cases.
+    @Override
+    public void onNotificationPosted(StatusBarNotification sbn) {
+        onNotificationUpdated(sbn);
     }
 
     public void registerListener(ProgressStateListener listener) {
