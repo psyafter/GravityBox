@@ -35,9 +35,11 @@ public class ModViewConfig {
                 XposedHelpers.findAndHookMethod(ViewConfiguration.class, "hasPermanentMenuKey",
                         XC_MethodReplacement.returnConstant(!"enabled".equals(mode)));
 
-                final Class<?> actionBarPolicyClass = XposedHelpers.findClass(CLASS_ACTIONBAR_POLICY, null);
-                XposedHelpers.findAndHookMethod(actionBarPolicyClass, "showsOverflowMenuButton",
-                        XC_MethodReplacement.returnConstant("enabled".equals(mode)));
+                final Class<?> actionBarPolicyClass = XposedHelpers.findClassIfExists(CLASS_ACTIONBAR_POLICY, null);
+                if (actionBarPolicyClass != null) {
+                    XposedHelpers.findAndHookMethod(actionBarPolicyClass, "showsOverflowMenuButton",
+                            XC_MethodReplacement.returnConstant("enabled".equals(mode)));
+                }
             }
         } catch (Throwable t) {
             GravityBox.log(TAG, t);
@@ -45,10 +47,12 @@ public class ModViewConfig {
 
         try {
             if (prefs.getBoolean(GravityBoxSettings.PREF_KEY_FORCE_LTR_DIRECTION, false)) {
-                final Class<?> activityManagerSvcClass = XposedHelpers.findClass(CLASS_ACTIVITY_TASK_MANAGER_SERVICE, classLoader);
-                    XposedHelpers.findAndHookMethod(activityManagerSvcClass, "updateConfigurationLocked", 
-                            Configuration.class, CLASS_ACTIVITY_RECORD, boolean.class, boolean.class,
-                            int.class, boolean.class, new XC_MethodHook() {
+                final Class<?> activityManagerSvcClass = XposedHelpers.findClassIfExists(CLASS_ACTIVITY_TASK_MANAGER_SERVICE, classLoader);
+                if (activityManagerSvcClass != null) {
+                    // A15 (dexdump): updateConfigurationLocked dropped the ActivityRecord arg and the
+                    // trailing boolean -> now (Configuration, boolean, boolean, int)Z.
+                    XposedHelpers.findAndHookMethod(activityManagerSvcClass, "updateConfigurationLocked",
+                            Configuration.class, boolean.class, boolean.class, int.class, new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(final MethodHookParam param) {
                             if (param.args[0] != null) {
@@ -56,6 +60,7 @@ public class ModViewConfig {
                             }
                         }
                     });
+                }
             }
         } catch (Throwable t) {
             GravityBox.log(TAG, t);
