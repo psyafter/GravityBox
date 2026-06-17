@@ -58,13 +58,18 @@ public class ModInputMethod {
         if (DEBUG) log("initZygote");
 
         try {
-            final Class<?> imeClass = XposedHelpers.findClass(CLASS_IME_SERVICE, null);
+            final Class<?> imeClass = XposedHelpers.findClassIfExists(CLASS_IME_SERVICE, null);
+            if (imeClass == null) {
+                if (DEBUG) log("InputMethodService class not found; skipping");
+                return;
+            }
 
             mVolKeyCursorControl = Integer.valueOf(prefs.getString(
                     GravityBoxSettings.PREF_KEY_VOL_KEY_CURSOR_CONTROL, "0"));
             mFullscreenImeDisabled = prefs.getBoolean(
                     GravityBoxSettings.PREF_KEY_IME_FULLSCREEN_DISABLE, false);
 
+            try {
             XposedHelpers.findAndHookMethod(imeClass, "onCreate", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
@@ -74,7 +79,9 @@ public class ModInputMethod {
                     if (DEBUG) log("IME service created");
                 }
             });
+            } catch (Throwable t) { GravityBox.log(TAG, "hook onCreate", t); }
 
+            try {
             XposedHelpers.findAndHookMethod(imeClass, "onDestroy", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
@@ -85,7 +92,9 @@ public class ModInputMethod {
                     }
                 }
             });
+            } catch (Throwable t) { GravityBox.log(TAG, "hook onDestroy", t); }
 
+            try {
             XposedHelpers.findAndHookMethod(imeClass, "onKeyDown", int.class, KeyEvent.class, new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(final MethodHookParam param) {
@@ -119,7 +128,9 @@ public class ModInputMethod {
                     }
                 }
             });
+            } catch (Throwable t) { GravityBox.log(TAG, "hook onKeyDown", t); }
 
+            try {
             XposedHelpers.findAndHookMethod(imeClass, "onKeyUp", int.class, KeyEvent.class, new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(final MethodHookParam param) {
@@ -137,7 +148,9 @@ public class ModInputMethod {
                     }
                 }
             });
+            } catch (Throwable t) { GravityBox.log(TAG, "hook onKeyUp", t); }
 
+            try {
             XposedHelpers.findAndHookMethod(imeClass, "onEvaluateFullscreenMode", new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(final MethodHookParam param) {
@@ -147,6 +160,7 @@ public class ModInputMethod {
                     }
                 }
             });
+            } catch (Throwable t) { GravityBox.log(TAG, "hook onEvaluateFullscreenMode", t); }
         } catch (Throwable t) {
             GravityBox.log(TAG, t);
         }
