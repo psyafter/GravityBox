@@ -118,8 +118,15 @@ public class ModTrustManager {
                     new HashSet<>());
             if (DEBUG) log("initAndroid: mWifiTrusted=" + mWifiTrusted);
 
-            XposedBridge.hookAllConstructors(XposedHelpers.findClass(
-                    CLASS_TRUST_MANAGER_SERVICE, classLoader), new XC_MethodHook() {
+            final Class<?> classTms = XposedHelpers.findClassIfExists(
+                    CLASS_TRUST_MANAGER_SERVICE, classLoader);
+            if (classTms == null) {
+                if (DEBUG) log("TrustManagerService not found; skipping");
+                return;
+            }
+
+            try {
+            XposedBridge.hookAllConstructors(classTms, new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(final MethodHookParam param) {
                     mTrustManager = param.thisObject;
@@ -135,7 +142,9 @@ public class ModTrustManager {
                     if (DEBUG) log("Trust manager constructed");
                 }
             });
+            } catch (Throwable t) { GravityBox.log(TAG, "hook TrustManagerService ctor", t); }
 
+            try {
             XposedHelpers.findAndHookMethod(CLASS_TRUST_MANAGER_SERVICE, classLoader,
                     "refreshAgentList", int.class, new XC_MethodHook() {
                 @Override
@@ -152,7 +161,9 @@ public class ModTrustManager {
                     mForceRefreshAgentList = false;
                 }
             });
+            } catch (Throwable t) { GravityBox.log(TAG, "hook refreshAgentList", t); }
 
+            try {
             XposedHelpers.findAndHookMethod(CLASS_TRUST_MANAGER_SERVICE, classLoader,
                     "updateTrustAll", new XC_MethodHook() {
                 @Override
@@ -160,7 +171,9 @@ public class ModTrustManager {
                     mUpdateTrustAlreadyCalled = true;
                 }
             });
+            } catch (Throwable t) { GravityBox.log(TAG, "hook updateTrustAll", t); }
 
+            try {
             XposedHelpers.findAndHookMethod(CLASS_TRUST_MANAGER_SERVICE, classLoader,
                     "aggregateIsTrustManaged", int.class, new XC_MethodHook() {
                 @Override
@@ -175,7 +188,9 @@ public class ModTrustManager {
                     }
                 }
             });
+            } catch (Throwable t) { GravityBox.log(TAG, "hook aggregateIsTrustManaged", t); }
 
+            try {
             XposedHelpers.findAndHookMethod(CLASS_TRUST_MANAGER_SERVICE, classLoader,
                     "aggregateIsTrusted", int.class, new XC_MethodHook() {
                 @Override
@@ -194,6 +209,7 @@ public class ModTrustManager {
                     }
                 }
             });
+            } catch (Throwable t) { GravityBox.log(TAG, "hook aggregateIsTrusted", t); }
         } catch (Throwable t) {
             GravityBox.log(TAG, t);
         }
