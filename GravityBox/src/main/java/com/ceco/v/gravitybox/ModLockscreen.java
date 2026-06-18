@@ -78,6 +78,10 @@ public class ModLockscreen {
     private static final String CLASS_NPV = "com.android.systemui.shade.NotificationPanelView";
     private static final String CLASS_NPVC_TOUCH_HANDLER = "com.android.systemui.shade.NotificationPanelViewController$TouchHandler";
     private static final String CLASS_KG_STATUS_VIEW = "com.android.keyguard.KeyguardStatusView";
+    // Root touch dispatcher of the keyguard/shade window — ALL lockscreen touches pass through it
+    // (the shade TouchHandler.onTouch only fires for shade-panel drags, so on One UI 7 the lockscreen
+    // touches, which go to Samsung's FaceWidgetDashBoard, never reach it). dexdump.
+    private static final String CLASS_NSWV = "com.android.systemui.shade.NotificationShadeWindowView";
     // A15/One UI: carrier text plumbing moved from CarrierTextController to CarrierTextManager;
     // postToCallback(CarrierTextManager$CarrierTextCallbackInfo) carries the 'carrierText' field
     // (CharSequence). CarrierTextController no longer has postToCallback (verified by dexdump).
@@ -569,34 +573,33 @@ public class ModLockscreen {
             GravityBox.log(TAG, "hook app bar onFinishInflate", t);
         }
 
-        // HOOK 16: double-tap-to-sleep on the keyguard. A15/One UI 7: the hooked method
-        // shade.NotificationPanelViewController$TouchHandler.onTouch(View,MotionEvent)Z is ALIVE; the
-        // touched view is shade.NotificationPanelView; the host reads the int field mBarState.
-        // mGestureDetector is created by prepareGestureDetector() in the (now live) setupLocked hook.
+        // HOOK 16: double-tap-to-sleep on the keyguard. A15/One UI 7: the shade TouchHandler.onTouch
+        // only sees shade-panel drags — on the Samsung lockscreen, touches go to FaceWidgetDashBoard
+        // and never reach it. Anchor on the keyguard/shade window's root dispatcher
+        // NotificationShadeWindowView.dispatchTouchEvent(MotionEvent) instead, which sees every
+        // lockscreen touch. Only OBSERVE (feed the gesture detector); never change the dispatch
+        // result. Gate on the keyguard actually showing (mKgMonitor). mGestureDetector is created by
+        // prepareGestureDetector() in the (live) setupLocked hook.
         try {
-            Class<?> touchHandlerClass = XposedHelpers.findClassIfExists(
-                    CLASS_NPVC_TOUCH_HANDLER, classLoader);
-            if (touchHandlerClass == null) throw new Throwable("TouchHandler not found");
-            XposedHelpers.findAndHookMethod(touchHandlerClass,
-                    "onTouch", View.class, MotionEvent.class, new XC_MethodHook() {
+            Class<?> nswvClass = XposedHelpers.findClassIfExists(CLASS_NSWV, classLoader);
+            if (nswvClass == null) throw new Throwable("NotificationShadeWindowView not found");
+            XposedHelpers.findAndHookMethod(nswvClass,
+                    "dispatchTouchEvent", MotionEvent.class, new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(final MethodHookParam param) {
                     try {
                         if (mPrefs.getBoolean(GravityBoxSettings.PREF_KEY_LOCKSCREEN_D2TS, false) &&
                                 mGestureDetector != null &&
-                                CLASS_NPV.equals(param.args[0].getClass().getName())) {
-                            Object host = XposedHelpers.getSurroundingThis(param.thisObject);
-                            if ((int) XposedHelpers.getIntField(host, "mBarState") == StatusBarState.KEYGUARD) {
-                                mGestureDetector.onTouchEvent((MotionEvent) param.args[1]);
-                            }
+                                mKgMonitor != null && mKgMonitor.isShowing()) {
+                            mGestureDetector.onTouchEvent((MotionEvent) param.args[0]);
                         }
                     } catch (Throwable t) {
-                        GravityBox.log(TAG, "DT2S onTouch", t);
+                        GravityBox.log(TAG, "DT2S dispatchTouchEvent", t);
                     }
                 }
             });
         } catch (Throwable t) {
-            GravityBox.log(TAG, "hook TouchHandler.onTouch (DT2S)", t);
+            GravityBox.log(TAG, "hook NotificationShadeWindowView.dispatchTouchEvent (DT2S)", t);
         }
 
         // HOOK 17: custom carrier text. REMAP (A15): postToCallback moved from CarrierTextController
