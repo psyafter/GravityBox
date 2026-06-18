@@ -68,7 +68,16 @@ public class ModLockscreen {
     // (the old class is gone) onto com.android.systemui.util.DeviceState and now takes a
     // Context arg: shouldEnableKeyguardScreenRotation(Context)Z (verified by dexdump).
     private static final String CLASS_DEVICE_STATE = "com.android.systemui.util.DeviceState";
-    private static final String CLASS_KG_VIEW_MANAGER = "com.android.systemui.statusbar.phone.StatusBarKeyguardViewManager";
+    // A15/One UI 7: Samsung OVERRIDES onStartedGoingToSleep/onStartedWakingUp in
+    // SafeUIStatusBarKeyguardViewManager (the bound runtime instance), so hooking the AOSP base was
+    // inert. Hook the subclass (where the overrides actually run) to drive direct/smart unlock.
+    private static final String CLASS_KG_VIEW_MANAGER = "com.android.systemui.statusbar.phone.SafeUIStatusBarKeyguardViewManager";
+    // A15/One UI 7: NotificationPanelView{,Controller$TouchHandler} moved to the shade package;
+    // KeyguardStatusView (extends GridLayout) is a live ViewGroup that hosts the app-bar (the old
+    // NPVC.mKeyguardStatusView field is gone -> MVC). All verified by dexdump.
+    private static final String CLASS_NPV = "com.android.systemui.shade.NotificationPanelView";
+    private static final String CLASS_NPVC_TOUCH_HANDLER = "com.android.systemui.shade.NotificationPanelViewController$TouchHandler";
+    private static final String CLASS_KG_STATUS_VIEW = "com.android.keyguard.KeyguardStatusView";
     // A15/One UI: carrier text plumbing moved from CarrierTextController to CarrierTextManager;
     // postToCallback(CarrierTextManager$CarrierTextCallbackInfo) carries the 'carrierText' field
     // (CharSequence). CarrierTextController no longer has postToCallback (verified by dexdump).
@@ -222,11 +231,12 @@ public class ModLockscreen {
         }
 
         // HOOK 2: custom lockscreen background via NotificationMediaManager.finishUpdateMediaMetaData.
-        // DEFERRED (A15): NotificationMediaManager still exists but the whole backdrop machinery is
-        // gone — no finishUpdateMediaMetaData(boolean,boolean,Bitmap) method and no mBackdrop /
-        // mBackdropBack / mStatusBarStateController fields (verified by dexdump; class now exposes
-        // only updateMediaMetaData(List)/(MediaListener) and a NotifPipeline). The lockscreen media
-        // backdrop moved to the Compose/MediaHost stack. Guarded so init cannot abort.
+        // DEFERRED (A15): the backdrop machinery is gone — no finishUpdateMediaMetaData(...) and no
+        // mBackdrop/mBackdropBack fields (Compose/MediaHost). The artwork DATA seam still exists
+        // (media.controls.domain.pipeline.MediaDataManager.addListener -> onMediaDataLoaded(...,
+        // MediaData)), but there is no longer a backdrop ImageView to render it onto — the keyguard
+        // background is Compose-rendered. Re-enabling needs a Compose keyguard-background seam (future
+        // work). Guarded so init cannot abort.
         try {
             Class<?> notifMediaMgrClass = XposedHelpers.findClassIfExists(CLASS_NOTIF_MEDIA_MANAGER, classLoader);
             if (notifMediaMgrClass == null) throw new Throwable("NotificationMediaManager not found");
@@ -514,40 +524,44 @@ public class ModLockscreen {
             GravityBox.log(TAG, "hook onStartedWakingUp", t);
         }
 
-        // HOOK 15: Lockscreen App Bar attaches to the keyguard_status_area container.
-        // DEFERRED (A15): NotificationPanelViewController moved to the com.android.systemui.shade
-        // package AND no longer holds an mKeyguardStatusView field — the status view is owned by
-        // mKeyguardStatusViewController (MVC migration), so there is no reachable ViewGroup to host
-        // the app bar (verified by dexdump). ModStatusBar.CLASS_NOTIF_PANEL_VIEW_CTRL still points
-        // at the old statusbar.phone path, so this resolves to null and no-ops; guarded regardless.
+        // HOOK 15: Lockscreen App Bar. A15/One UI 7: NPVC no longer holds an mKeyguardStatusView
+        // field (MVC); instead host the bar on KeyguardStatusView (extends GridLayout — a live
+        // ViewGroup). Prefer its keyguard_status_area child, fall back to the view itself.
         try {
-            Class<?> npvcClass = XposedHelpers.findClassIfExists(
-                    ModStatusBar.CLASS_NOTIF_PANEL_VIEW_CTRL, classLoader);
-            if (npvcClass == null) throw new Throwable("NotificationPanelViewController not found (app bar)");
-            XposedHelpers.findAndHookMethod(npvcClass,
+            Class<?> kgStatusViewClass = XposedHelpers.findClassIfExists(CLASS_KG_STATUS_VIEW, classLoader);
+            if (kgStatusViewClass == null) throw new Throwable("KeyguardStatusView not found (app bar)");
+            XposedHelpers.findAndHookMethod(kgStatusViewClass,
                     "onFinishInflate", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(final MethodHookParam param) {
-                    ViewGroup kgStatusView = (ViewGroup) XposedHelpers.getObjectField(
-                            param.thisObject, "mKeyguardStatusView");
-                    Resources res = kgStatusView.getResources();
-                    String containerName = Utils.isOxygenOsRom() ? "status_view_container" : "keyguard_status_area";
-                    int containerId = res.getIdentifier(containerName, "id", PACKAGE_NAME);
-                    if (containerId != 0) {
-                        ViewGroup container = kgStatusView.findViewById(containerId);
-                        if (Utils.isSamsungRom()) {
-                            container = (ViewGroup) kgStatusView.getChildAt(0);
+                    try {
+                        ViewGroup kgStatusView = (ViewGroup) param.thisObject;
+                        // KeyguardStatusView inflates before the mediator's setupLocked runs, so the
+                        // static mContext/mGbContext may still be null here — use the view's context.
+                        Context ctx = kgStatusView.getContext();
+                        Context gbCtx = Utils.getGbContext(ctx);
+                        Resources res = kgStatusView.getResources();
+                        String containerName = Utils.isOxygenOsRom() ? "status_view_container" : "keyguard_status_area";
+                        int containerId = res.getIdentifier(containerName, "id", PACKAGE_NAME);
+                        ViewGroup container = containerId != 0 ?
+                                (ViewGroup) kgStatusView.findViewById(containerId) : null;
+                        if (container == null) container = kgStatusView; // fall back to the status view
+                        // KeyguardStatusView inflates before setupLocked, so the KeyguardMonitor the
+                        // app-bar registers on may not exist yet — create it now (idempotent with
+                        // setupLocked's own null-check).
+                        if (SysUiManagers.KeyguardMonitor == null) {
+                            SysUiManagers.createKeyguardMonitor(ctx, prefs);
                         }
-                        if (container != null) {
-                            mAppBar = new LockscreenAppBar(mContext, mGbContext, container,
-                                    param.thisObject, prefs);
-                            if (SysUiManagers.ConfigChangeMonitor != null) {
-                                SysUiManagers.ConfigChangeMonitor.addConfigChangeListener(mAppBar);
-                            }
-                            if (Utils.isUserUnlocked(mContext)) {
-                                mAppBar.initAppSlots();
-                            }
+                        mAppBar = new LockscreenAppBar(ctx, gbCtx, container,
+                                param.thisObject, prefs);
+                        if (SysUiManagers.ConfigChangeMonitor != null) {
+                            SysUiManagers.ConfigChangeMonitor.addConfigChangeListener(mAppBar);
                         }
+                        if (Utils.isUserUnlocked(ctx)) {
+                            mAppBar.initAppSlots();
+                        }
+                    } catch (Throwable t) {
+                        GravityBox.log(TAG, "app bar attach", t);
                     }
                 }
             });
@@ -555,25 +569,29 @@ public class ModLockscreen {
             GravityBox.log(TAG, "hook app bar onFinishInflate", t);
         }
 
-        // HOOK 16: double-tap-to-sleep on the keyguard. SIGFIX (A15): the hooked method
-        // NotificationPanelViewController$TouchHandler.onTouch(View,MotionEvent)Z is ALIVE (now in
-        // the com.android.systemui.shade package). The host NPVC no longer exposes mStatusBar.mState;
-        // the keyguard state is read directly from the int field mBarState (verified by dexdump).
+        // HOOK 16: double-tap-to-sleep on the keyguard. A15/One UI 7: the hooked method
+        // shade.NotificationPanelViewController$TouchHandler.onTouch(View,MotionEvent)Z is ALIVE; the
+        // touched view is shade.NotificationPanelView; the host reads the int field mBarState.
+        // mGestureDetector is created by prepareGestureDetector() in the (now live) setupLocked hook.
         try {
             Class<?> touchHandlerClass = XposedHelpers.findClassIfExists(
-                    ModStatusBar.CLASS_TOUCH_HANDLER, classLoader);
+                    CLASS_NPVC_TOUCH_HANDLER, classLoader);
             if (touchHandlerClass == null) throw new Throwable("TouchHandler not found");
             XposedHelpers.findAndHookMethod(touchHandlerClass,
                     "onTouch", View.class, MotionEvent.class, new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(final MethodHookParam param) {
-                    if (mPrefs.getBoolean(GravityBoxSettings.PREF_KEY_LOCKSCREEN_D2TS, false) &&
-                            mGestureDetector != null &&
-                            ModStatusBar.CLASS_NOTIF_PANEL_VIEW.equals(param.args[0].getClass().getName())) {
-                        Object host = XposedHelpers.getSurroundingThis(param.thisObject);
-                        if ((int) XposedHelpers.getIntField(host, "mBarState") == StatusBarState.KEYGUARD) {
-                            mGestureDetector.onTouchEvent((MotionEvent) param.args[1]);
+                    try {
+                        if (mPrefs.getBoolean(GravityBoxSettings.PREF_KEY_LOCKSCREEN_D2TS, false) &&
+                                mGestureDetector != null &&
+                                CLASS_NPV.equals(param.args[0].getClass().getName())) {
+                            Object host = XposedHelpers.getSurroundingThis(param.thisObject);
+                            if ((int) XposedHelpers.getIntField(host, "mBarState") == StatusBarState.KEYGUARD) {
+                                mGestureDetector.onTouchEvent((MotionEvent) param.args[1]);
+                            }
                         }
+                    } catch (Throwable t) {
+                        GravityBox.log(TAG, "DT2S onTouch", t);
                     }
                 }
             });
@@ -609,14 +627,13 @@ public class ModLockscreen {
         }
 
         // HOOKS 11/12/13: lockscreen bottom-action shortcuts (left/right affordance + camera).
-        // DEFERRED (A15): KeyguardBottomAreaView still exists but was rewritten to MVC/Kotlin —
-        // onFinishInflate() survives, but the mRightAffordanceView / mLeftAffordanceView / mDozing
-        // fields and the launchPhone / launchLeftAffordance / launchCamera methods are all GONE
-        // (now getLeftView()/getRightView() delegates + a ViewModel-driven init; verified by
-        // dexdump). The affordances moved to the keyguard-quick-affordance framework. The
-        // onFinishInflate hook installs but its layout listener reads dead fields (null -> no-op,
-        // try/caught); the two method hooks below resolve to nothing. Whole block guarded so the
-        // rest of init is unaffected. The KeyguardBottomAreaView class lookup is null-guarded.
+        // DEFERRED (A15): the affordances moved to the keyguard-quick-affordance framework
+        // (keyguard.data.repository.KeyguardQuickAffordanceRepository + config providers/ViewModels);
+        // KeyguardBottomAreaView's mLeft/RightAffordanceView fields and launchPhone/launchCamera
+        // methods are gone. Swapping icon/intent now means injecting a KeyguardQuickAffordanceConfig
+        // into that repository — a deep, fragile framework reimpl deferred to future work. The
+        // method hooks below resolve to nothing (guarded); the crashing layout-listener was removed
+        // (see §22). KeyguardBottomAreaView class lookup is null-guarded.
         try {
             Class<?> kgBottomAreaClass = XposedHelpers.findClassIfExists(CLASS_KG_BOTTOM_AREA_VIEW, classLoader);
             if (kgBottomAreaClass == null) throw new Throwable("KeyguardBottomAreaView not found");
@@ -652,35 +669,37 @@ public class ModLockscreen {
             GravityBox.log(TAG, "hook bottom actions (KeyguardBottomAreaView)", t);
         }
 
-        // HOOK 14: keyguard scrim alpha (background opacity).
-        // DEFERRED (A15): ScrimController.scheduleUpdate() is gone (now onPreDraw()/doOnTheNextFrame())
-        // and ScrimState.setScrimBehindAlphaKeyguard(float) is gone — the scrim alpha model was
-        // redesigned (ScrimState now has getMaxLightRevealScrimAlpha()/updateScrimColor(); verified
-        // by dexdump). No drop-in equivalent to push a per-state keyguard alpha. Guarded so init
-        // does not abort; both class lookups are null-guarded.
+        // HOOK 14: keyguard scrim alpha (background opacity). A15/One UI 7: ScrimController
+        // .scheduleUpdate() and ScrimState.setScrimBehindAlphaKeyguard(float) are gone, BUT the
+        // per-state float field mScrimBehindAlphaKeyguard still exists on each ScrimState enum
+        // constant (dexdump). Apply our alpha by writing that field directly, on each updateScrims()
+        // (the live update entry that replaced scheduleUpdate), before the scrims are recomputed.
         try {
             Class<?> scrimCtrlClass = XposedHelpers.findClassIfExists(CLASS_SCRIM_CONTROLLER, classLoader);
             final Class<?> scrimStateClass = XposedHelpers.findClassIfExists(CLASS_SCRIM_STATE, classLoader);
             if (scrimCtrlClass == null || scrimStateClass == null)
                 throw new Throwable("ScrimController/ScrimState not found");
             XposedHelpers.findAndHookMethod(scrimCtrlClass,
-            "scheduleUpdate", new XC_MethodHook() {
+            "updateScrims", new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
-                    int opacity = mPrefs.getInt(
-                            GravityBoxSettings.PREF_KEY_LOCKSCREEN_BACKGROUND_OPACITY, 0);
-                    if (opacity == 0) opacity = 55;
-                    Object[] states = (Object[]) XposedHelpers.callStaticMethod(
-                            scrimStateClass, "values");
-                    final float alpha = (100 - opacity) / 100f;
-                    for (Object state : states) {
-                        XposedHelpers.callMethod(state,
-                                "setScrimBehindAlphaKeyguard", alpha);
+                    try {
+                        int opacity = mPrefs.getInt(
+                                GravityBoxSettings.PREF_KEY_LOCKSCREEN_BACKGROUND_OPACITY, 0);
+                        if (opacity == 0) opacity = 55;
+                        final float alpha = (100 - opacity) / 100f;
+                        Object[] states = (Object[]) XposedHelpers.callStaticMethod(
+                                scrimStateClass, "values");
+                        for (Object state : states) {
+                            XposedHelpers.setFloatField(state, "mScrimBehindAlphaKeyguard", alpha);
+                        }
+                    } catch (Throwable t) {
+                        GravityBox.log(TAG, "scrim alpha apply", t);
                     }
                 }
             });
         } catch (Throwable t) {
-            GravityBox.log(TAG, "hook scheduleUpdate (background opacity)", t);
+            GravityBox.log(TAG, "hook updateScrims (background opacity)", t);
         }
 
         // HOOK 18: disable lockscreen next-alarm info. REMAP (A15): KeyguardSliceProvider
