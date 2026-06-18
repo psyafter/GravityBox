@@ -54,6 +54,10 @@ public class ModPower {
     private static final int MSG_UNREGISTER_PROX_SENSOR_LISTENER = 101;
     public static final int MAX_PROXIMITY_WAIT = 500;
     private static final int MAX_PROXIMITY_TTL = MAX_PROXIMITY_WAIT * 2;
+    private static final int WAKE_REASON_POWER_BUTTON = 1; // PowerManager.WAKE_REASON_POWER_BUTTON
+    // PowerManager.WAKE_REASON_PLUGGED_IN — the reason wakePowerGroupLocked gets for a power-state
+    // (plug/unplug) wake on A15 (the old shouldWakeUpWhenPluggedOrUnpluggedLocked is gone).
+    private static final int WAKE_REASON_PLUGGED_IN = 3;
 
     private static Context mContext;
     private static Handler mHandler;
@@ -69,6 +73,7 @@ public class ModPower {
     private static int mLockscreenTorch = 0;
     private static QuietHours mQh;
     private static boolean mAdvancedPowerMenuEnabled;
+    private static boolean mSuppressPlugUnplugWake; // "unplug turns on screen" disabled by user
 
     private static void log(String message) {
         XposedBridge.log(TAG + ": " + message);
@@ -125,6 +130,8 @@ public class ModPower {
                     GravityBoxSettings.PREF_KEY_POWER_PROXIMITY_WAKE_IGNORE_CALL, false);
             mLockscreenTorch = Integer.valueOf(
                     prefs.getString(GravityBoxSettings.PREF_KEY_HWKEY_LOCKSCREEN_TORCH, "0"));
+            mSuppressPlugUnplugWake = !prefs.getBoolean(
+                    GravityBoxSettings.PREF_KEY_UNPLUG_TURNS_ON_SCREEN, true);
 
             try {
             XposedBridge.hookAllConstructors(pmServiceClass, new XC_MethodHook() {
@@ -133,9 +140,6 @@ public class ModPower {
                     mContext = (Context) XposedHelpers.getObjectField(param.thisObject, "mContext");
                     mHandler = (Handler) XposedHelpers.getObjectField(param.thisObject, "mHandler");
                     mLock = XposedHelpers.getObjectField(param.thisObject, "mLock");
-                    // NOT force-enabled here: a bad wake re-anchor could stop the screen waking and
-                    // block testing of every other module. Left gated off (hook is then a no-op);
-                    // proximity-wake is toggled on via ACTION_PREF_POWER_CHANGED broadcast in Phase C.
                     toggleWakeUpWithProximityFeature(
                             prefs.getBoolean(GravityBoxSettings.PREF_KEY_POWER_PROXIMITY_WAKE, false));
 
@@ -155,6 +159,22 @@ public class ModPower {
                     int.class, boolean.class, new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(final MethodHookParam param) {
+                    // Wake-on-unplug suppression: A15 has no shouldWakeUpWhenPluggedOrUnpluggedLocked;
+                    // the plug/unplug wake comes through here with reason == WAKE_REASON_PLUGGED_IN
+                    // (dexdump: updateIsPoweredLocked -> wakePowerGroupLocked(..., 3, ...)). When the
+                    // user disabled "unplug turns on screen", drop that wake.
+                    if (mSuppressPlugUnplugWake && (int) param.args[2] == WAKE_REASON_PLUGGED_IN) {
+                        if (DEBUG) log("Suppressing plug/unplug wake (reason=PLUGGED_IN)");
+                        param.setResult(null);
+                        return;
+                    }
+
+                    // CRITICAL: only the POWER-BUTTON wake gets the proximity delay. Intercepting
+                    // every wake reason (boot/display-group/plug/gesture) hangs system_server on the
+                    // boot-time display wake. The feature is "check proximity when you press power".
+                    if ((int) param.args[2] != WAKE_REASON_POWER_BUTTON)
+                        return;
+
                     if (Utils.isMotoXtDevice()) {
                         createMotoSpecificHooks(classLoader);
                     }
@@ -233,18 +253,9 @@ public class ModPower {
             GravityBox.log(TAG, t);
         }
 
-        // Wake on plug/unplug. DEFERRED on A15 (dexdump): shouldWakeUpWhenPluggedOrUnpluggedLocked
-        // was removed by the display-group refactor. Gated off by default; guarded so a forced gate
-        // would hit a caught NoSuchMethod rather than crash. Re-anchoring is Tier-3 work.
-        try {
-            if (pmServiceClass != null &&
-                    !prefs.getBoolean(GravityBoxSettings.PREF_KEY_UNPLUG_TURNS_ON_SCREEN, true)) {
-                XposedHelpers.findAndHookMethod(pmServiceClass, "shouldWakeUpWhenPluggedOrUnpluggedLocked",
-                    boolean.class, int.class, boolean.class, XC_MethodReplacement.returnConstant(false));
-            }
-        } catch (Throwable t) {
-            GravityBox.log(TAG, t);
-        }
+        // Wake-on-unplug is now handled inside the wakePowerGroupLocked hook above (reason ==
+        // WAKE_REASON_PLUGGED_IN), since the old shouldWakeUpWhenPluggedOrUnpluggedLocked anchor was
+        // removed by the A15 display-group refactor.
 
         // Advanced power menu: Adjust reboot dialog titles
         if (!Utils.isSamsungRom()) {
