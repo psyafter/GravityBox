@@ -23,6 +23,7 @@ import java.util.Set;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.pm.ActivityInfo;
+import android.content.Intent;
 import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.database.ContentObserver;
@@ -101,6 +102,14 @@ public class ModPieControls {
 
     private static BroadcastMediator.Receiver mBroadcastReceiver = (context, intent) -> {
         if (DEBUG) log("Broadcast received: " + intent.toString());
+        if (Intent.ACTION_CONFIGURATION_CHANGED.equals(intent.getAction())) {
+            // A15: base SystemUI.onConfigurationChanged anchor is gone; re-attach pie on the
+            // system config-change broadcast instead (covers rotation/fold). Guard the callback
+            // (not just install) so a throw here can't crash SystemUI.
+            if (DEBUG) log("Configuration changed -> re-attaching pie");
+            try { attachPie(); } catch (Throwable t) { GravityBox.log(TAG, "config re-attach", t); }
+            return;
+        }
         if (intent.getAction().equals(GravityBoxSettings.ACTION_PREF_PIE_CHANGED)) {
             if (intent.hasExtra(GravityBoxSettings.EXTRA_PIE_ENABLE)) {
                 mPieMode = intent.getIntExtra(GravityBoxSettings.EXTRA_PIE_ENABLE, 0);
@@ -360,7 +369,8 @@ public class ModPieControls {
                     SysUiManagers.BroadcastMediator.subscribe(mBroadcastReceiver,
                             GravityBoxSettings.ACTION_PREF_PIE_CHANGED,
                             GravityBoxSettings.ACTION_PREF_EXPANDED_DESKTOP_MODE_CHANGED,
-                            GravityBoxSettings.ACTION_PREF_HWKEY_CHANGED);
+                            GravityBoxSettings.ACTION_PREF_HWKEY_CHANGED,
+                            Intent.ACTION_CONFIGURATION_CHANGED);
 
                     mSettingsObserver = new PieSettingsObserver(new Handler());
                     mSettingsObserver.onChange(true);
@@ -369,9 +379,9 @@ public class ModPieControls {
             });
             } catch (Throwable t) { GravityBox.log(TAG, "hook CentralSurfacesImpl.start", t); }
 
-            // DEFERRED (A15): base SystemUI class is gone (-> CoreStartable) and CentralSurfacesImpl
-            // has no onConfigurationChanged/onConfigChanged anchor -> no clean re-attach-on-config-change
-            // hook. Pie still re-attaches via the settings observer / broadcast receiver.
+            // Config/rotation re-attach: the base SystemUI.onConfigurationChanged anchor is gone on
+            // A15 (-> CoreStartable); we now re-attach pie from the ACTION_CONFIGURATION_CHANGED
+            // system broadcast handled in mBroadcastReceiver above.
 
             // disable() moved off StatusBar to CommandQueue.disable(int displayId, int state1,
             // int state2, boolean animate). Track previous state ourselves (mDisabled1 is gone).
@@ -413,9 +423,11 @@ public class ModPieControls {
             });
             } catch (Throwable t) { GravityBox.log(TAG, "hook NavigationBar.setImeWindowStatus", t); }
 
-            // DEFERRED (A15): StatusBar.topAppWindowChanged removed entirely -> no per-top-app menu
-            // visibility signal. Pie menu visibility still honours the mShowMenuItem/mAlwaysShowMenuItem
-            // prefs applied at attach time.
+            // DEFERRED (A15, no replacement found): StatusBar.topAppWindowChanged was removed
+            // entirely and dexdump shows no equivalent per-top-app menu-visibility callback
+            // (CommandQueue.Callbacks has only PiP/keyboard-shortcuts/global-actions menus). The
+            // legacy app menu-key concept is gone. Pie menu visibility honours the
+            // mShowMenuItem/mAlwaysShowMenuItem prefs applied at attach time.
         } catch (Throwable t) {
             GravityBox.log(TAG, t);
         }
