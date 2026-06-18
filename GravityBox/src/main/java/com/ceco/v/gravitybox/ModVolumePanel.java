@@ -77,6 +77,11 @@ public class ModVolumePanel {
             "com.samsung.systemui.splugins.volume.VolumePanelState";
     private static final String CLASS_VOLUME_PANEL_ROW =
             "com.samsung.systemui.splugins.volume.VolumePanelRow";
+    // Single chokepoint that decides which stream the panel is active on (fed to the reducer ->
+    // VolumePanelState.getActiveStream). The splugins VolumeInfraMediator is an interface (abstract
+    // setActiveStream); hook the concrete impl. dexdump: VolumeInfraMediatorImpl.setActiveStream(I)V.
+    private static final String CLASS_VOLUME_INFRA_MEDIATOR =
+            "com.android.systemui.volume.VolumeInfraMediatorImpl";
 
     private static final boolean DEBUG = false;
 
@@ -266,6 +271,31 @@ public class ModVolumePanel {
                 }
             } catch (Throwable t) { GravityBox.log(TAG, "hook VolumeRowView.updateProgress", t); }
 
+            // ===== Feature: force ring control on media keys (mVolForceRingControl) =====
+            // A15/One UI 7: no per-row defaultStream flag. The panel's active stream is set upstream
+            // at VolumeInfraMediator.setActiveStream(int) (then fed to the reducer ->
+            // VolumePanelState.getActiveStream). When forcing ring control, remap MUSIC->RING at that
+            // single chokepoint so the panel (and its slider) controls the ringer instead of media.
+            try {
+                final Class<?> classInfra =
+                        XposedHelpers.findClassIfExists(CLASS_VOLUME_INFRA_MEDIATOR, classLoader);
+                if (classInfra != null) {
+                    XposedHelpers.findAndHookMethod(classInfra, "setActiveStream", int.class,
+                            new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(final MethodHookParam param) {
+                            if (mVolForceRingControl
+                                    && (int) param.args[0] == AudioManager.STREAM_MUSIC) {
+                                if (DEBUG) log("force-ring: remap active stream MUSIC -> RING");
+                                param.args[0] = AudioManager.STREAM_RING;
+                            }
+                        }
+                    });
+                } else if (DEBUG) {
+                    log("VolumeInfraMediator not found; force-ring disabled");
+                }
+            } catch (Throwable t) { GravityBox.log(TAG, "hook VolumeInfraMediator.setActiveStream", t); }
+
         } catch (Throwable t) {
             GravityBox.log(TAG, t);
         }
@@ -378,13 +408,7 @@ public class ModVolumePanel {
         return null;
     }
 
-    // -------------------------------------------------------------------------------------------
-    // DEFERRED (A15 Samsung store): default-stream override (mVolForceRingControl / "force ring
-    // control on media keys"). On AOSP this flipped VolumeRow.defaultStream between MUSIC and RING.
-    // On One UI 7 there is no per-row "defaultStream" flag: the active stream is the store value
-    // VolumePanelState.getActiveStream(), produced by the reducer from the hardware key event, and
-    // there is no reachable, side-effect-free seam to remap MUSIC<->RING without re-dispatching a
-    // store action (which the reducer owns). Left deferred rather than faked. The mVolForceRingControl
-    // pref is still tracked above so it can be wired once the key/active-stream reducer path is reversed.
-    // -------------------------------------------------------------------------------------------
+    // Note: force-ring (mVolForceRingControl) is now implemented in init() by remapping the active
+    // stream MUSIC->RING at VolumeInfraMediator.setActiveStream(int) — the single upstream chokepoint
+    // that feeds the reducer / VolumePanelState.getActiveStream().
 }
