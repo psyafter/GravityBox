@@ -36,7 +36,16 @@ public class PermissionGranter {
 
     public static void initAndroid(final ClassLoader classLoader) {
         try {
-            final Class<?> pmServiceClass = XposedHelpers.findClass(CLASS_PERMISSION_MANAGER_SERVICE, classLoader);
+            final Class<?> pmServiceClass = XposedHelpers.findClassIfExists(CLASS_PERMISSION_MANAGER_SERVICE, classLoader);
+            // DEFERRED (A15): PermissionManagerServiceInternal$PermissionCallback (the 4th param of
+            // restorePermissionState) is gone — the method signature changed. Guard the dead lookups
+            // so they skip silently. Re-anchoring the permission auto-grant to the new signature is
+            // future work (the settings handshake works via other means already).
+            if (pmServiceClass == null
+                    || XposedHelpers.findClassIfExists(CLASS_PERMISSION_CALLBACK, classLoader) == null) {
+                if (DEBUG) log("PermissionManagerService/PermissionCallback not available; auto-grant skipped");
+                return;
+            }
 
             XposedHelpers.findAndHookMethod(pmServiceClass, "restorePermissionState",
                     CLASS_ANDROID_PACKAGE, boolean.class, String.class,

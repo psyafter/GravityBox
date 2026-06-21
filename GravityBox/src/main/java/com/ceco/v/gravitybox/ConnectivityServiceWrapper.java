@@ -115,8 +115,16 @@ public class ConnectivityServiceWrapper {
 
     public static void initAndroid(final ClassLoader classLoader) {
         try {
-            final Class<?> connServiceClass = 
-                    XposedHelpers.findClass(CLASS_CONNECTIVITY_SERVICE, classLoader);
+            // DEFERRED (A15): com.android.server.ConnectivityService moved to the Connectivity
+            // mainline/APEX module and is not visible from system_server's classloader (see
+            // port-progress.md Backlog). Guard the dead lookup so it skips silently; hooking the
+            // mainline class is a separate task.
+            final Class<?> connServiceClass =
+                    XposedHelpers.findClassIfExists(CLASS_CONNECTIVITY_SERVICE, classLoader);
+            if (connServiceClass == null) {
+                if (DEBUG) log("ConnectivityService not visible (moved to APEX); skipping");
+                return;
+            }
 
             XposedBridge.hookAllConstructors(connServiceClass, new XC_MethodHook() {
                 @Override
