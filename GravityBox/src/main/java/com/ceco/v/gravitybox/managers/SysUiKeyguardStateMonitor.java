@@ -134,7 +134,12 @@ public class SysUiKeyguardStateMonitor implements BroadcastMediator.Receiver {
                     }
                 }
             };
-            XposedHelpers.findAndHookMethod(kgStateCtrlClass, "notifyKeyguardChanged", stateChangeHook);
+            // A15/One UI 7: notifyKeyguardChanged is gone; the live notify path is notifyKeyguardState
+            // (hooked below, hookAllMethods = silent if absent). Pre-check the old method so it skips
+            // silently on A15 instead of logging a NoSuchMethodError.
+            if (XposedHelpers.findMethodExactIfExists(kgStateCtrlClass, "notifyKeyguardChanged") != null) {
+                XposedHelpers.findAndHookMethod(kgStateCtrlClass, "notifyKeyguardChanged", stateChangeHook);
+            }
             XposedBridge.hookAllMethods(kgStateCtrlClass, "notifyKeyguardState", stateChangeHook);
 
             XposedHelpers.findAndHookMethod(CLASS_KG_VIEW_MEDIATOR, cl,
