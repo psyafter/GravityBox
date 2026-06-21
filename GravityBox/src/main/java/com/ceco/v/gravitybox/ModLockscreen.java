@@ -243,7 +243,12 @@ public class ModLockscreen {
         // work). Guarded so init cannot abort.
         try {
             Class<?> notifMediaMgrClass = XposedHelpers.findClassIfExists(CLASS_NOTIF_MEDIA_MANAGER, classLoader);
-            if (notifMediaMgrClass == null) throw new Throwable("NotificationMediaManager not found");
+            // Method-existence pre-checked: the class survives but finishUpdateMediaMetaData(...) is
+            // gone on A15 (deferred above), so skip silently instead of logging a NoSuchMethodError.
+            if (notifMediaMgrClass == null || XposedHelpers.findMethodExactIfExists(notifMediaMgrClass,
+                    "finishUpdateMediaMetaData", boolean.class, boolean.class, Bitmap.class) == null) {
+                if (DEBUG) log("finishUpdateMediaMetaData not available (deferred); media background skipped");
+            } else {
             XposedHelpers.findAndHookMethod(notifMediaMgrClass,
                     "finishUpdateMediaMetaData", boolean.class, boolean.class,
                     Bitmap.class, new XC_MethodHook() {
@@ -291,6 +296,7 @@ public class ModLockscreen {
                     }
                 }
             });
+            }
         } catch (Throwable t) {
             GravityBox.log(TAG, "hook finishUpdateMediaMetaData", t);
         }
@@ -646,17 +652,23 @@ public class ModLockscreen {
             // try/catch, which crash-loops SystemUI. The affordances moved to the keyguard
             // quick-affordance framework; re-porting the icon swap there is future work.
 
-            XposedHelpers.findAndHookMethod(kgBottomAreaClass,
-                    Utils.isSamsungRom() ? "launchPhone" : "launchLeftAffordance",
-                    new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(final MethodHookParam param) throws Throwable {
-                    if (mLeftAction != null) {
-                        SysUiManagers.AppLauncher.startActivity(mContext, mLeftAction.getIntent());
-                        param.setResult(null);
+            // Method-existence pre-checked: launchPhone/launchLeftAffordance are gone on A15
+            // (deferred above), so skip silently instead of logging a NoSuchMethodError.
+            // hookAllMethods("launchCamera") below is a no-op when absent (no throw).
+            final String leftMethod = Utils.isSamsungRom() ? "launchPhone" : "launchLeftAffordance";
+            if (XposedHelpers.findMethodExactIfExists(kgBottomAreaClass, leftMethod) != null) {
+                XposedHelpers.findAndHookMethod(kgBottomAreaClass, leftMethod, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(final MethodHookParam param) throws Throwable {
+                        if (mLeftAction != null) {
+                            SysUiManagers.AppLauncher.startActivity(mContext, mLeftAction.getIntent());
+                            param.setResult(null);
+                        }
                     }
-                }
-            });
+                });
+            } else if (DEBUG) {
+                log(leftMethod + " not available (affordances deferred); skipped");
+            }
 
             XposedBridge.hookAllMethods(kgBottomAreaClass,
                      "launchCamera", new XC_MethodHook() {
