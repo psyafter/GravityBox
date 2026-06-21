@@ -81,6 +81,10 @@ public class ModStatusBar {
     // extends TextView). The old AOSP statusbar.policy.Clock is gone.
     private static final String CLASS_QS_CLOCK = "com.android.systemui.statusbar.policy.QSClock";
     public static final String CLASS_TOUCH_HANDLER = CLASS_PANEL_VIEW_CTRL + ".TouchHandler";
+    // A15/One UI 7: root touch dispatcher of the keyguard/shade window — every lockscreen touch
+    // passes through it (the old PanelViewController$TouchHandler is gone). Used to re-anchor
+    // lockscreen brightness control (same pattern as ModLockscreen DT2S, §23).
+    private static final String CLASS_NSWV = "com.android.systemui.shade.NotificationShadeWindowView";
     private static final boolean DEBUG = false;
     private static final boolean DEBUG_LAYOUT = false;
 
@@ -778,17 +782,25 @@ public class ModStatusBar {
             }
 
             // Header
+            // QS-header battery style. DEFERRED (A15/One UI 7): com.android.systemui.qs.QSFragment is
+            // gone — Quick Settings was rewritten (Compose / Samsung QS). Guarded so the dead lookup
+            // skips silently. Re-anchoring needs the live Samsung QS-header class (future work).
             try {
-                XposedHelpers.findAndHookMethod(CLASS_QS_FRAGMENT, classLoader, "onViewCreated",
-                        View.class, Bundle.class, new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        if (prefs.getBoolean(GravityBoxSettings.PREF_KEY_BATTERY_TWEAKS_ENABLED, true)) {
-                            prepareBatteryStyleHeader((ViewGroup) XposedHelpers.getObjectField(
-                                    param.thisObject, "mHeader"));
+                final Class<?> qsFragment = XposedHelpers.findClassIfExists(CLASS_QS_FRAGMENT, classLoader);
+                if (qsFragment != null) {
+                    XposedHelpers.findAndHookMethod(qsFragment, "onViewCreated",
+                            View.class, Bundle.class, new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            if (prefs.getBoolean(GravityBoxSettings.PREF_KEY_BATTERY_TWEAKS_ENABLED, true)) {
+                                prepareBatteryStyleHeader((ViewGroup) XposedHelpers.getObjectField(
+                                        param.thisObject, "mHeader"));
+                            }
                         }
-                    }
-                });
+                    });
+                } else if (DEBUG) {
+                    log("QSFragment not available (QS rewritten); header battery skipped");
+                }
             } catch (Throwable t) {
                 GravityBox.log(TAG, "Error setting up header:" + t);
             }
@@ -854,26 +866,24 @@ public class ModStatusBar {
                 GravityBox.log(TAG, "Error setting up ongoing notification control", t);
             }
 
-            // Expanded notifications
+            // Expanded notifications. A15/One UI 7: the old isUserExpanded()/setSystemExpanded(boolean)
+            // are gone; isExpanded(boolean)Z is the live query that decides whether a row renders
+            // expanded — force it true when the feature is on. Method-existence pre-checked so a
+            // future signature change skips silently instead of logging.
             try {
-                if (Utils.isSamsungRom()) {
-                    XposedHelpers.findAndHookMethod(expandableNotifRowClass, "isUserExpanded", new XC_MethodHook() {
+                if (expandableNotifRowClass != null && XposedHelpers.findMethodExactIfExists(
+                        expandableNotifRowClass, "isExpanded", boolean.class) != null) {
+                    XposedHelpers.findAndHookMethod(expandableNotifRowClass, "isExpanded", boolean.class,
+                            new XC_MethodHook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        protected void afterHookedMethod(MethodHookParam param) {
                             if (mNotifExpandAll) {
                                 param.setResult(true);
                             }
                         }
                     });
-                } else {
-                    XposedHelpers.findAndHookMethod(expandableNotifRowClass, "setSystemExpanded", boolean.class, new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            if (mNotifExpandAll) {
-                                param.args[0] = true;
-                            }
-                        }
-                    });
+                } else if (DEBUG) {
+                    log("ExpandableNotificationRow.isExpanded not available; expand-all skipped");
                 }
             } catch (Throwable t) {
                 GravityBox.log(TAG, "Error setting up always expanded notifications", t);
@@ -914,27 +924,37 @@ public class ModStatusBar {
                 GravityBox.log(TAG, t);
             }
 
-            // Disable peek
+            // Disable peek. DEFERRED (A15/One UI 7): the "peek" notification animation is gone — the
+            // shade was rewritten to Compose and PanelViewController.runPeekAnimation no longer exists
+            // (dexdump). Class lookups are guarded so dead anchors skip silently (no log spam).
             try {
-                XposedHelpers.findAndHookMethod(CLASS_PANEL_VIEW_CTRL, classLoader,
-                        "runPeekAnimation", long.class, float.class, boolean.class, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        if (mDisablePeek) {
-                            param.setResult(null);
+                final Class<?> panelViewCtrl = XposedHelpers.findClassIfExists(CLASS_PANEL_VIEW_CTRL, classLoader);
+                if (panelViewCtrl != null && XposedHelpers.findMethodExactIfExists(panelViewCtrl,
+                        "runPeekAnimation", long.class, float.class, boolean.class) != null) {
+                    XposedHelpers.findAndHookMethod(panelViewCtrl, "runPeekAnimation",
+                            long.class, float.class, boolean.class, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            if (mDisablePeek) {
+                                param.setResult(null);
+                            }
                         }
-                    }
-                });
-                XposedBridge.hookAllMethods(XposedHelpers.findClass(CLASS_NOTIF_PANEL_VIEW_CTRL, classLoader),
-                        "expand", new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        if (mDisablePeek) {
-                            XposedHelpers.setBooleanField(param.thisObject,
-                                    QsQuickPulldownHandler.getQsExpandFieldName(), false);
+                    });
+                }
+                final Class<?> notifPanelViewCtrl = XposedHelpers.findClassIfExists(CLASS_NOTIF_PANEL_VIEW_CTRL, classLoader);
+                if (notifPanelViewCtrl != null) {
+                    XposedBridge.hookAllMethods(notifPanelViewCtrl, "expand", new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            if (mDisablePeek) {
+                                XposedHelpers.setBooleanField(param.thisObject,
+                                        QsQuickPulldownHandler.getQsExpandFieldName(), false);
+                            }
                         }
-                    }
-                });
+                    });
+                } else if (DEBUG) {
+                    log("Disable-peek anchors not available on this build; skipped");
+                }
             } catch (Throwable t) {
                 GravityBox.log(TAG, "Error setting up Disable peek hooks: ", t);
             }
@@ -1011,51 +1031,79 @@ public class ModStatusBar {
                 // ignore as some earlier 6.0 releases lack that functionality
             }
 
-            // brightness control in lock screen
+            // Brightness control on the lock screen. A15/One UI 7: the old
+            // PanelViewController$TouchHandler.onTouch is gone; lockscreen touches go through the
+            // keyguard/shade window root dispatcher NotificationShadeWindowView.dispatchTouchEvent
+            // (same re-anchor as ModLockscreen DT2S, §23). Gate on keyguard showing + the feature;
+            // observe-only (feed brightnessControl, never change the dispatch result). brightnessControl
+            // itself ignores touches below the status-bar strip, so feeding all touches is safe.
             try {
-                XposedHelpers.findAndHookMethod(CLASS_TOUCH_HANDLER, classLoader, "onTouch",
-                        View.class, MotionEvent.class, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        if (mBrightnessControlEnabled &&
-                                CLASS_NOTIF_PANEL_VIEW.equals(param.args[0].getClass().getName())) {
-                            Object host = XposedHelpers.getSurroundingThis(param.thisObject);
-                            View kgHeader = (View) XposedHelpers.getObjectField(
-                                    host, "mKeyguardStatusBar");
-                            if (kgHeader.getVisibility() == View.VISIBLE) {
-                                brightnessControl((MotionEvent) param.args[1], null);
+                final Class<?> nswvClass = XposedHelpers.findClassIfExists(CLASS_NSWV, classLoader);
+                if (nswvClass != null) {
+                    XposedHelpers.findAndHookMethod(nswvClass, "dispatchTouchEvent",
+                            MotionEvent.class, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            try {
+                                if (mBrightnessControlEnabled
+                                        && SysUiManagers.KeyguardMonitor != null
+                                        && SysUiManagers.KeyguardMonitor.isShowing()) {
+                                    brightnessControl((MotionEvent) param.args[0], null);
+                                }
+                            } catch (Throwable t) {
+                                GravityBox.log(TAG, "lockscreen brightness dispatch", t);
                             }
                         }
-                    }
-                });
+                    });
+                } else if (DEBUG) {
+                    log("NotificationShadeWindowView not found; lockscreen brightness skipped");
+                }
             } catch (Throwable t) {
                 GravityBox.log(TAG, t);
             }
 
-            // Hide center layout whenever needed
+            // Hide center layout whenever needed. DEFERRED (A15/One UI 7): CollapsedStatusBarFragment
+            // is alive (moved to ...phone.fragment) but hideSystemIconArea/showSystemIconArea are gone
+            // — the icon-area visibility model was reworked (now showEndSideContent /
+            // updateNotificationIconAreaAndOngoingActivityChip). Method-existence pre-checked so the
+            // dead anchors skip silently; re-anchoring the center-layout hide/show is future work.
             try {
-                XposedHelpers.findAndHookMethod(CLASS_COLLAPSED_SB_FRAGMENT, classLoader,
-                        "hideSystemIconArea", boolean.class, new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        if (DEBUG) log("hideSystemIconArea");
-                        updateHiddenByPolicy(true);
-                    }
-                });
-                XposedHelpers.findAndHookMethod(CLASS_COLLAPSED_SB_FRAGMENT, classLoader,
-                        "showSystemIconArea", boolean.class, new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        if (DEBUG) log("showSystemIconArea");
-                        updateHiddenByPolicy(false);
-                    }
-                });
+                final Class<?> collapsedSbFragment = XposedHelpers.findClassIfExists(CLASS_COLLAPSED_SB_FRAGMENT, classLoader);
+                if (collapsedSbFragment != null && XposedHelpers.findMethodExactIfExists(
+                        collapsedSbFragment, "hideSystemIconArea", boolean.class) != null) {
+                    XposedHelpers.findAndHookMethod(collapsedSbFragment,
+                            "hideSystemIconArea", boolean.class, new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            if (DEBUG) log("hideSystemIconArea");
+                            updateHiddenByPolicy(true);
+                        }
+                    });
+                    XposedHelpers.findAndHookMethod(collapsedSbFragment,
+                            "showSystemIconArea", boolean.class, new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            if (DEBUG) log("showSystemIconArea");
+                            updateHiddenByPolicy(false);
+                        }
+                    });
+                } else if (DEBUG) {
+                    log("CollapsedStatusBarFragment hide/showSystemIconArea not available; center-layout hide skipped");
+                }
             } catch (Throwable t) {
                 GravityBox.log(TAG, t);
             }
 
-            // Adjust notification icon area for center layout and max notification icons
+            // Adjust notification icon area for center layout and max notification icons.
+            // DEFERRED (A15/One UI 7): NotificationIconContainer is alive but getActualWidth() — the
+            // key width-override hook this whole feature hinges on — is gone, and calculateIconTranslations
+            // was renamed to calculateIconXTranslations (dexdump). Gate the whole block on getActualWidth's
+            // existence so the dead anchors skip silently; re-anchoring max-notif-icons to the reworked
+            // (Compose-adjacent) icon area is future work.
             try {
+              final Class<?> notifIconContainer = XposedHelpers.findClassIfExists(CLASS_NOTIF_ICON_CONTAINER, classLoader);
+              if (notifIconContainer != null && XposedHelpers.findMethodExactIfExists(
+                      notifIconContainer, "getActualWidth") != null) {
                 XposedHelpers.findAndHookMethod(CLASS_NOTIF_ICON_CONTAINER, classLoader,
                         "getActualWidth", new XC_MethodHook() {
                     @Override
@@ -1196,6 +1244,9 @@ public class ModStatusBar {
                         }
                     });
                 }
+              } else if (DEBUG) {
+                log("NotificationIconContainer.getActualWidth not available; max-notif-icons skipped");
+              }
             } catch (Throwable t) {
                 GravityBox.log(TAG, t);
             }
