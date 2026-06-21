@@ -66,7 +66,14 @@ public class ModLedControl {
     public static final boolean DEBUG = false;
     private static final boolean DEBUG_EXTRAS = false;
     private static final String CLASS_NOTIFICATION_MANAGER_SERVICE = "com.android.server.notification.NotificationManagerService";
-    private static final String CLASS_VIBRATOR_SERVICE = "com.android.server.VibratorService";
+    // A15: buzzBeepBlinkLocked + updateLightsLocked moved off NMS into NotificationAttentionHelper.
+    // buzzBeepBlinkLocked gained a NotificationAttentionHelper$Signals 2nd arg (NotificationRecord is
+    // still arg0); updateLightsLocked stays no-arg; mScreenOn field is present on the helper too.
+    private static final String CLASS_NOTIF_ATTENTION_HELPER = "com.android.server.notification.NotificationAttentionHelper";
+    private static final String CLASS_NOTIF_ATTENTION_SIGNALS = "com.android.server.notification.NotificationAttentionHelper.Signals";
+    // A12+: com.android.server.VibratorService -> com.android.server.vibrator.VibratorManagerService;
+    // startVibrationLocked is still present (now startVibrationLocked(HalVibration)).
+    private static final String CLASS_VIBRATOR_SERVICE = "com.android.server.vibrator.VibratorManagerService";
     private static final String CLASS_STATUSBAR = "com.android.systemui.statusbar.phone.StatusBar";
     private static final String CLASS_NOTIF_FILTER = "com.android.systemui.statusbar.notification.NotificationFilter";
     private static final String CLASS_NOTIF_DATA_ENTRY = "com.android.systemui.statusbar.notification.collection.NotificationEntry";
@@ -229,14 +236,25 @@ public class ModLedControl {
                     Context.class, StatusBarNotification.class, NotificationChannel.class,
                     createNotificationRecordHook);
 
-            XposedHelpers.findAndHookMethod(CLASS_NOTIFICATION_MANAGER_SERVICE, classLoader,
-                    "buzzBeepBlinkLocked", CLASS_NOTIFICATION_RECORD, buzzBeepBlinkLockedHook);
+            // A15: re-anchor onto NotificationAttentionHelper (fall back to NMS for older builds).
+            final Class<?> attentionHelper = XposedHelpers.findClassIfExists(CLASS_NOTIF_ATTENTION_HELPER, classLoader);
+            if (attentionHelper != null) {
+                XposedHelpers.findAndHookMethod(attentionHelper, "buzzBeepBlinkLocked",
+                        CLASS_NOTIFICATION_RECORD, CLASS_NOTIF_ATTENTION_SIGNALS, buzzBeepBlinkLockedHook);
+                XposedHelpers.findAndHookMethod(attentionHelper, "updateLightsLocked", updateLightsLockedHook);
+            } else {
+                XposedHelpers.findAndHookMethod(CLASS_NOTIFICATION_MANAGER_SERVICE, classLoader,
+                        "buzzBeepBlinkLocked", CLASS_NOTIFICATION_RECORD, buzzBeepBlinkLockedHook);
+                XposedHelpers.findAndHookMethod(CLASS_NOTIFICATION_MANAGER_SERVICE, classLoader,
+                        "updateLightsLocked", updateLightsLockedHook);
+            }
 
-            XposedHelpers.findAndHookMethod(CLASS_NOTIFICATION_MANAGER_SERVICE, classLoader,
-                    "updateLightsLocked", updateLightsLockedHook);
-
-            XposedBridge.hookAllMethods(XposedHelpers.findClass(CLASS_VIBRATOR_SERVICE, classLoader),
-                    "startVibrationLocked", startVibrationHook);
+            final Class<?> vibratorService = XposedHelpers.findClassIfExists(CLASS_VIBRATOR_SERVICE, classLoader);
+            if (vibratorService != null) {
+                XposedBridge.hookAllMethods(vibratorService, "startVibrationLocked", startVibrationHook);
+            } else if (DEBUG) {
+                log("VibratorManagerService not found; QuietHours vibration suppression skipped");
+            }
         } catch (Throwable t) {
             GravityBox.log(TAG, t);
         }
@@ -765,9 +783,17 @@ public class ModLedControl {
     };
 
     public static void init(final XSharedPreferences prefs, final ClassLoader classLoader) {
+        // DEFERRED (A15/One UI 7): the monolithic statusbar.notification.NotificationFilter is gone —
+        // notification filtering moved to the pluggable NotifCollection pipeline (NotifFilter.
+        // shouldFilterOut(NotificationEntry, long); see §20). Guard the dead lookup so it skips
+        // silently. Re-anchoring UNC filtering to the new pluggable pipeline is future work.
+        final Class<?> notifFilter = XposedHelpers.findClassIfExists(CLASS_NOTIF_FILTER, classLoader);
+        if (notifFilter == null) {
+            if (DEBUG) log("NotificationFilter not available (pipeline rewritten); UNC filtering skipped");
+            return;
+        }
         try {
-            XposedBridge.hookAllMethods(
-                    XposedHelpers.findClass(CLASS_NOTIF_FILTER, classLoader),
+            XposedBridge.hookAllMethods(notifFilter,
                     "shouldFilterOut", new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
