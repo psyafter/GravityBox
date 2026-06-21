@@ -38,8 +38,10 @@ public class SystemIconController implements BroadcastMediator.Receiver {
     private static final String CLASS_PHONE_STATUSBAR_POLICY =
             "com.android.systemui.statusbar.phone.PhoneStatusBarPolicy";
     private static final String CLASS_STATUS_BAR_ICON = "com.android.internal.statusbar.StatusBarIcon";
+    // A15/One UI 7: moved to the ...phone.ui subpackage; setIconVisibility(String,boolean) is intact
+    // (dexdump). The old ...phone.StatusBarIconControllerImpl path no longer exists.
     private static final String CLASS_SB_ICON_CONTROLLER =
-            "com.android.systemui.statusbar.phone.StatusBarIconControllerImpl";
+            "com.android.systemui.statusbar.phone.ui.StatusBarIconControllerImpl";
 
     public static final String SLOT_BLUETOOTH = "bluetooth";
     public static final String SLOT_VOLUME = "volume";
@@ -92,9 +94,14 @@ public class SystemIconController implements BroadcastMediator.Receiver {
             GravityBox.log(TAG, t);
         }
 
+        final Class<?> sbIconCtrl = XposedHelpers.findClassIfExists(CLASS_SB_ICON_CONTROLLER, classLoader);
+        if (sbIconCtrl == null) {
+            if (DEBUG) log("StatusBarIconControllerImpl not found; statusbar icon control skipped");
+            return;
+        }
+
         try {
-            XposedBridge.hookAllConstructors(XposedHelpers.findClass(
-                    CLASS_SB_ICON_CONTROLLER, classLoader), new XC_MethodHook() {
+            XposedBridge.hookAllConstructors(sbIconCtrl, new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     mIconCtrl = param.thisObject;
@@ -109,7 +116,7 @@ public class SystemIconController implements BroadcastMediator.Receiver {
         }
 
         try {
-            XposedHelpers.findAndHookMethod(CLASS_SB_ICON_CONTROLLER, classLoader,
+            XposedHelpers.findAndHookMethod(sbIconCtrl,
                     "setIconVisibility", String.class, boolean.class, new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
