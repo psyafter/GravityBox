@@ -467,7 +467,17 @@ public class ModLedControl {
             final boolean interactive =
                     getPowerManager().isInteractive() &&
                     !getKeyguardManager().isKeyguardLocked();
-            final int callState = getTelephonyManager().getCallState();
+            // A14+: the no-arg getCallState() runs enforceCallingPackage and fails here because this
+            // hook executes inside system_server's notification-enqueue path, where the Binder
+            // calling identity is the notifying app (uid != "android"/1000). Clear the calling
+            // identity so the check sees the system uid (matches package "android") and passes.
+            final int callState;
+            final long ident = Binder.clearCallingIdentity();
+            try {
+                callState = getTelephonyManager().getCallState();
+            } finally {
+                Binder.restoreCallingIdentity(ident);
+            }
             if (DEBUG) log("isUserPresent: interactive=" + interactive +
                     "; call state=" + callState);
             return (interactive || callState == TelephonyManager.CALL_STATE_OFFHOOK);
